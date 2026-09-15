@@ -38,6 +38,9 @@ pub enum RouteTarget {
     Capability { name: String },
     /// Broadcast to every live holder installation-wide.
     AnyHolder { name: String },
+    /// Deliver to the producer named by the envelope's `destination`
+    /// (request/response correlation, e.g. face-ID replies).
+    Producer,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -354,6 +354,16 @@ impl Hub {
                 RouteTarget::AnyHolder { name } => {
                     hub.send_to_holders(name, source, envelope, payload)
                 }
+                RouteTarget::Producer => match envelope.destination.as_deref() {
+                    Some(target) => {
+                        if hub.send_to_producer(target, envelope, payload).is_ok() {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    None => 0,
+                },
             }
         } else {
             warn!(

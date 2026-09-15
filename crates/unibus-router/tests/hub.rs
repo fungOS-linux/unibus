@@ -438,3 +438,35 @@ fn heartbeat_keeps_registration_and_reconnect_works() {
     let got = tv2.recv_until("canvas_command");
     assert_eq!(got.message.body["command"], json!(2));
 }
+
+#[test]
+fn producer_mode_routes_response_by_destination() {
+    let hub = TestHub::with(
+        r#"{"kind": "fr_response", "target": {"mode": "producer"}},"#,
+        vec![],
+    );
+    let mut face_id = hub.node("brain", &["canvas.command"], &[]);
+    let mut requester = hub.node("tv", &["display"], &["screen-tv"]);
+    let _other = hub.node("studio", &["display"], &["screen-left"]);
+
+    face_id
+        .send(
+            Message::new("fr_response", json!({"faces": []})),
+            Some("tv"),
+        )
+        .unwrap();
+    let got = requester.recv_until("fr_response");
+    assert_eq!(got.message.body["faces"], json!([]));
+    let (first_ack, _) = face_id.recv();
+    assert_eq!(first_ack.message.body["success"], json!(true));
+
+    // unknown destination fails the ack loudly
+    face_id
+        .send(
+            Message::new("fr_response", json!({"faces": []})),
+            Some("ghost"),
+        )
+        .unwrap();
+    let (ack, _) = face_id.recv();
+    assert_eq!(ack.message.body["success"], json!(false));
+}
