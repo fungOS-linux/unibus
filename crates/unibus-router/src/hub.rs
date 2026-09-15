@@ -251,12 +251,14 @@ impl Hub {
         loop {
             let (envelope, payload) = match read_frame(&mut reader) {
                 Ok(frame) => frame,
-                Err(unibus::FrameError::Io(e))
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
+                // macOS reports an SO_RCVTIMEO expiry as EAGAIN/WouldBlock,
+                // not TimedOut: idle polls are normal, only EOF ends a
+                // session politely.
+                Err(unibus::FrameError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    self.prune_dead();
+                    continue;
+                }
+                Err(unibus::FrameError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     return Ok(());
                 }
                 Err(e) => return Err(e.into()),
