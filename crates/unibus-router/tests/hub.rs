@@ -470,3 +470,46 @@ fn producer_mode_routes_response_by_destination() {
     let (ack, _) = face_id.recv();
     assert_eq!(ack.message.body["success"], json!(false));
 }
+
+/// Broadcast relay: the shape of JARVIS's mute propagation, as a plugin.
+#[derive(Default)]
+struct MuteRelay;
+
+impl HubPlugin for MuteRelay {
+    fn handle(
+        &self,
+        hub: &HubHandle,
+        source: &str,
+        envelope: &PluginEnvelope,
+        _payload: &[u8],
+    ) -> Result<bool> {
+        if envelope.message.kind != "mute_request" {
+            return Ok(false);
+        }
+        let state = Envelope::new(
+            hub.installation_id(),
+            source,
+            None,
+            "",
+            Message::new("mute_state", json!({"muted": true, "actor": source})),
+        );
+        hub.broadcast(source, &state, &[]);
+        Ok(true)
+    }
+}
+
+#[test]
+fn broadcast_plugin_reaches_every_other_node() {
+    let hub = TestHub::with("", vec![Arc::new(MuteRelay)]);
+    let mut tv = hub.node("tv", &["display"], &["screen-tv"]);
+    let mut studio = hub.node("studio", &["display"], &["screen-left"]);
+    let mut muter = hub.node("brain", &["canvas.command"], &[]);
+
+    muter
+        .send(Message::new("mute_request", json!({"global": true})), None)
+        .unwrap();
+    for listener in [&mut tv, &mut studio] {
+        let got = listener.recv_until("mute_state");
+        assert_eq!(got.message.body["muted"], json!(true));
+    }
+}

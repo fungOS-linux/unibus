@@ -101,16 +101,19 @@ impl HubConfig {
             "invalid installation_id"
         );
         ensure!(!self.listen.is_empty(), "listen address is required");
-        // TCP hub binds loopback only; remote nodes use authenticated
-        // tunnels. A QUIC listener on the tailnet arrives with dock-48wn and
-        // its own explicit bind address — never implied.
+        // Loopback is the default and preferred; `0.0.0.0` (direct trusted
+        // LAN, token-authenticated) is the JARVIS deployment reality. Any
+        // other specific bind address is rejected — a hub on one interface
+        // is a decision, not an accident. QUIC-on-tailnet arrives with
+        // dock-48wn under its own explicit policy.
         let parsed: std::net::SocketAddr = self
             .listen
             .parse()
             .map_err(|e| anyhow!("invalid listen address {}: {e}", self.listen))?;
         ensure!(
-            parsed.ip().is_loopback(),
-            "TCP hub must bind loopback; remote nodes use tunnels"
+            parsed.ip().is_loopback() || parsed.ip().is_unspecified(),
+            "TCP hub must bind loopback or 0.0.0.0 (trusted LAN); got {}",
+            parsed.ip()
         );
         ensure!(
             !self.nodes.is_empty(),
@@ -182,7 +185,17 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_loopback_listen() {
+    fn accepts_direct_lan_bind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            r#"{"installation_id":"home","listen":"0.0.0.0:18790","nodes":[{"producer_id":"n","token_file":"token","zones":["z"],"capabilities":["display"]}]}"#,
+        );
+        assert!(HubConfig::read(&path).is_ok());
+    }
+
+    #[test]
+    fn rejects_specific_non_loopback_bind() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(
             dir.path(),

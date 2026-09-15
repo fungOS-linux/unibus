@@ -80,6 +80,29 @@ impl HubHandle {
         }
     }
 
+    /// Every live producer except `exclude` (installation-wide broadcast).
+    pub fn broadcast(&self, exclude: &str, envelope: &Envelope, payload: &[u8]) -> usize {
+        let targets: Vec<String> = match self.conns.lock() {
+            Ok(conns) => conns
+                .keys()
+                .filter(|id| id.as_str() != exclude)
+                .cloned()
+                .collect(),
+            Err(_) => return 0,
+        };
+        let mut delivered = 0;
+        for target in targets {
+            if self
+                .connection(&target)
+                .map(|conn| conn.push(envelope, payload).is_ok())
+                .unwrap_or(false)
+            {
+                delivered += 1;
+            }
+        }
+        delivered
+    }
+
     /// Live nodes holding a capability, installation-wide.
     pub fn nodes_with(&self, capability: &str) -> Vec<Delivery> {
         let registry = match self.registry.lock() {
