@@ -27,15 +27,32 @@ cargo fmt --all
 
 ## Layout
 
+`crates/unibus` — the L1 contract:
+
 | Path | What |
 |---|---|
 | `src/envelope.rs` | The frozen envelope shape, TTL/installation validation |
 | `src/framing.rs` | `[u32 BE len][JSON][binary payload]` codec |
+| `src/kinds.rs` | Control-plane kinds (`register`/`heartbeat`/`reply`, v1+v2) |
 | `src/qos.rs` | command / stream / snapshot classification |
 | `src/grants.rs` | Node grants: zones, namespaced capabilities, anchors, site, role |
 | `src/auth.rs` | fpl-auth-aligned JWT claim shape + offline freshness rules |
 | `tests/wire_compat.rs` | Golden JARVIS v1 frames — the cross-repo contract |
-| `DESIGN.md` | The normative contract |
+
+`crates/unibus-router` — the hub daemon, lifted from `jarvis-router`:
+
+| Path | What |
+|---|---|
+| `src/hub.rs` | Accept loop, registration/auth, ack policy, anchor/zone/capability relay |
+| `src/registry.rs` | Live node registry: heartbeats (3 s / 10 s TTL), deterministic selection |
+| `src/config.rs` | A v1 `router.json` loads unchanged; v2 adds routes table + site/role |
+| `src/plugin.rs` | `HubPlugin`/`Sink` seam — stateful domain behavior (like presence fan-out) lives with its domain |
+| `src/auth.rs` | v1 shared-token mode until the fpl-auth `OfflineVerifier` lands |
+| `tests/hub.rs` | End-to-end over loopback: routing, echoes, anchors, plugin gating |
+
+Routing is configuration: the hub maps message kinds to capabilities via a
+`routes` table; unknown kinds without a plugin fail loudly. The hub parses
+only `register` — every data body stays opaque.
 
 Related: `FuturePresentLabs/dock` — `docs/unibus.md` (Canvas's use of the
 bus); JARVIS — `jarvis-router`, `jarvis-edge`, `distributed-topology.md`.

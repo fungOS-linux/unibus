@@ -7,7 +7,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     /// Authoritative origin for content and state.
@@ -15,6 +15,7 @@ pub enum Role {
     /// Site pull-through cache; serves reads, writes go through origin.
     Cache,
     /// Display/audio/sensor surface with no authority of its own.
+    #[default]
     Edge,
 }
 
@@ -35,7 +36,9 @@ impl fmt::Display for Role {
 #[serde(deny_unknown_fields)]
 pub struct NodeGrant {
     pub producer_id: String,
-    /// OIDC subject (fpl-auth) this node's tokens must present.
+    /// OIDC subject (fpl-auth) this node's tokens must present. Empty only in
+    /// v1 compatibility mode (shared-token auth).
+    #[serde(default)]
     pub auth_subject: String,
     #[serde(default)]
     pub zones: Vec<String>,
@@ -44,8 +47,14 @@ pub struct NodeGrant {
     #[serde(default)]
     pub screen_anchors: Vec<String>,
     /// Declared topology label: `home-lan`, `wan`, `agora-lan`, ...
+    #[serde(default = "default_site")]
     pub site: String,
+    #[serde(default)]
     pub role: Role,
+}
+
+fn default_site() -> String {
+    "default".into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +131,33 @@ impl NodeGrant {
             return Err(GrantError::InvalidName {
                 field: "auth_subject",
                 value: self.auth_subject.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// v1 compatibility mode: JARVIS router v1 grants use bare capability
+    /// tags (`display`, `audio_output`) and shared bearer tokens. Same
+    /// duplicate/blank checks, no namespacing requirement. A v2 deployment
+    /// must use [`NodeGrant::validate`].
+    pub fn validate_v1_compat(&self) -> Result<(), GrantError> {
+        for value in self
+            .capabilities
+            .iter()
+            .chain(self.zones.iter())
+            .chain(self.screen_anchors.iter())
+        {
+            if value.trim().is_empty() || value.len() > 128 {
+                return Err(GrantError::InvalidName {
+                    field: "grant entry",
+                    value: value.clone(),
+                });
+            }
+        }
+        if self.producer_id.trim().is_empty() || self.producer_id.len() > 128 {
+            return Err(GrantError::InvalidName {
+                field: "identity",
+                value: self.producer_id.clone(),
             });
         }
         Ok(())

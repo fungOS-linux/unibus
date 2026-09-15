@@ -1,0 +1,19 @@
+[package]
+name = "unibus-router"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hub daemon for the household bus: registry, grants, and QoS-aware relay. Lifted from jarvis-router."
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+unibus = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

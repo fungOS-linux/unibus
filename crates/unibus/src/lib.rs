@@ -14,12 +14,15 @@ pub mod auth;
 pub mod envelope;
 pub mod framing;
 pub mod grants;
+pub mod kinds;
 pub mod qos;
 
 pub use auth::{AuthError, NodeClaims, OfflineVerifier};
 pub use envelope::{
-    Envelope, EnvelopeError, MAX_FRAME, Message, SCHEMA_VERSION_V1, SCHEMA_VERSION_V2,
+    DEFAULT_TTL_MS, Envelope, EnvelopeError, MAX_FRAME, MAX_FUTURE_SKEW_MS, Message,
+    SCHEMA_VERSION_V1, SCHEMA_VERSION_V2,
 };
 pub use framing::{FrameError, read_frame, write_frame};
-pub use grants::{NodeGrant, Role};
+pub use grants::{NodeGrant, Role, is_valid_namespaced_name, is_valid_slug};
+pub use kinds::Control;
 pub use qos::Qos;

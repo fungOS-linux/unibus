@@ -1,0 +1,10 @@
+[package]
+name = "unibus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wire contract for the household bus: envelopes, framing, grants, and QoS classes. L1 stays dumb."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
