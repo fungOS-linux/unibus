@@ -226,6 +226,7 @@ impl Hub {
             ),
         );
         connection.push(&reply, &[])?;
+        self.broadcast_node_state(&producer_id, true);
 
         let outcome = self.connection_loop(&producer_id, &connection, reader);
 
@@ -234,12 +235,24 @@ impl Hub {
         // A dying connection must never evict the registration or socket
         // slot of a connection that replaced it; registrations expire via
         // heartbeat TTL, not via this cleanup.
-        if let Ok(mut conns) = self.conns.lock()
-            && conns
-                .get(&producer_id)
-                .is_some_and(|current| Arc::ptr_eq(current, &(connection.clone() as Arc<dyn Sink>)))
-        {
-            conns.remove(&producer_id);
+        let was_owner = {
+            match self.conns.lock() {
+                Ok(mut conns) => {
+                    let owned = conns.get(&producer_id).is_some_and(|current| {
+                        Arc::ptr_eq(current, &(connection.clone() as Arc<dyn Sink>))
+                    });
+                    if owned {
+                        conns.remove(&producer_id);
+                    }
+                    owned
+                }
+                Err(_) => false,
+            }
+        };
+        // Only the connection that still owns the slot may declare the
+        // producer offline; a replaced connection must not evict a live one.
+        if was_owner {
+            self.broadcast_node_state(&producer_id, false);
         }
         let Err(e) = outcome else {
             return Ok(());
@@ -340,6 +353,32 @@ impl Hub {
                     ),
                 );
                 connection.push(&reply, &[])?;
+            }
+        }
+    }
+
+    /// Producer liveness, pushed to every connected node so consumers can
+    /// invalidate state a dead producer left behind (e.g. a voice brain's
+    /// "thinking" pill). Latest-value truth about one producer.
+    fn broadcast_node_state(&self, producer_id: &str, online: bool) {
+        let message = Message::new(
+            unibus::kinds::NODE_STATE,
+            serde_json::json!({"producer_id": producer_id, "online": online}),
+        );
+        let envelope = Envelope::new(
+            &self.config.installation_id,
+            "unibus-hub",
+            None,
+            "",
+            message,
+        );
+        let conns = match self.conns.lock() {
+            Ok(conns) => conns,
+            Err(_) => return,
+        };
+        for (node, conn) in conns.iter() {
+            if node != producer_id {
+                let _ = conn.push(&envelope, &[]);
             }
         }
     }

@@ -143,6 +143,10 @@ impl Node {
         read_frame(&mut self.stream).unwrap()
     }
 
+    fn recv_reply(&mut self) -> Envelope {
+        self.recv_until("reply")
+    }
+
     fn recv_until(&mut self, want: &str) -> Envelope {
         for _ in 0..16 {
             let (envelope, _) = self.recv();
@@ -201,10 +205,10 @@ fn sender_is_never_echoed_and_stream_gets_no_ack() {
         .unwrap();
     // brain is itself a display in `default`; it must only get the ack —
     // and the ack is a loud failure because no other display is connected.
-    let ack = brain.recv();
-    assert_eq!(kinds::classify(&ack.0.message.kind), Control::Reply);
-    assert_eq!(ack.0.message.body["success"], json!(false));
-    assert_eq!(ack.0.message.body["message"], json!("no eligible nodes"));
+    let ack = brain.recv_reply();
+    assert_eq!(kinds::classify(&ack.message.kind), Control::Reply);
+    assert_eq!(ack.message.body["success"], json!(false));
+    assert_eq!(ack.message.body["message"], json!("no eligible nodes"));
     brain
         .stream
         .set_read_timeout(Some(Duration::from_millis(200)))
@@ -247,8 +251,8 @@ fn target_screen_routes_to_exactly_one_anchor() {
         .unwrap();
     let got = studio.recv_until("canvas_command");
     assert_eq!(got.target_screen.as_deref(), Some("screen-left"));
-    // ack back to the brain
-    let (ack, _) = brain.recv();
+    // ack back to the brain (liveness announcements may arrive first)
+    let ack = brain.recv_reply();
     assert_eq!(kinds::classify(&ack.message.kind), Control::Reply);
     assert_eq!(ack.message.body["success"], json!(true));
 }
@@ -398,7 +402,7 @@ fn plugin_can_gate_and_fan_out() {
         .unwrap();
     let got = tv.recv_until("test.snapshot");
     assert_eq!(got.message.body["occupied"], json!(true));
-    let (ack, _) = sensor.recv();
+    let ack = sensor.recv_reply();
     assert_eq!(ack.message.body["success"], json!(true));
 
     // a node without presence_capture may not publish
@@ -409,7 +413,7 @@ fn plugin_can_gate_and_fan_out() {
             None,
         )
         .unwrap();
-    let (ack, _) = rogue.recv();
+    let ack = rogue.recv_reply();
     assert_eq!(ack.message.body["success"], json!(false));
 }
 
@@ -457,7 +461,7 @@ fn producer_mode_routes_response_by_destination() {
         .unwrap();
     let got = requester.recv_until("fr_response");
     assert_eq!(got.message.body["faces"], json!([]));
-    let (first_ack, _) = face_id.recv();
+    let first_ack = face_id.recv_reply();
     assert_eq!(first_ack.message.body["success"], json!(true));
 
     // unknown destination fails the ack loudly
@@ -540,4 +544,18 @@ fn second_same_producer_connection_survives_firsts_disconnect() {
     );
     let got = second.recv_until("canvas_command");
     assert_eq!(got.message.body["command"]["n"], json!(1));
+}
+
+#[test]
+fn producers_learn_when_a_peer_goes_offline() {
+    let hub = start("");
+    let mut watcher = hub.node("studio", &["display"], &["screen-left"]);
+    let transient = hub.node("tv", &["display"], &["screen-tv"]);
+    let online = watcher.recv_until("unibus.node_state");
+    assert_eq!(online.message.body["producer_id"], json!("tv"));
+    assert_eq!(online.message.body["online"], json!(true));
+    drop(transient);
+    let offline = watcher.recv_until("unibus.node_state");
+    assert_eq!(offline.message.body["producer_id"], json!("tv"));
+    assert_eq!(offline.message.body["online"], json!(false));
 }

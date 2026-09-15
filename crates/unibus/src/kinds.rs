@@ -17,6 +17,10 @@ pub const V1_HEARTBEAT: &str = "heartbeat";
 pub const V1_REPLY: &str = "reply";
 
 pub const REGISTER: &str = "unibus.register";
+/// Hub-pushed producer liveness: `{producer_id, online}`. Consumers use it
+/// to invalidate state a dead producer left behind (orphan pills, stale
+/// sources). Latest-value truth about one producer.
+pub const NODE_STATE: &str = "unibus.node_state";
 pub const HEARTBEAT: &str = "unibus.heartbeat";
 pub const REPLY: &str = "unibus.reply";
 
