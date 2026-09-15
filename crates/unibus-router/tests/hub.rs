@@ -513,3 +513,31 @@ fn broadcast_plugin_reaches_every_other_node() {
         assert_eq!(got.message.body["muted"], json!(true));
     }
 }
+
+#[test]
+fn second_same_producer_connection_survives_firsts_disconnect() {
+    // JARVIS Sound dials the hub twice under one producer id (status +
+    // remote input). The first connection's cleanup must not evict the
+    // registration or socket slot of the one that replaced it.
+    let hub = start("");
+    let first = hub.node("tv", &["display"], &["screen-tv"]);
+    let mut second = hub.node("tv", &["display"], &["screen-tv"]);
+    drop(first);
+    std::thread::sleep(Duration::from_millis(150));
+
+    let mut brain = hub.node("brain", &["canvas.command"], &[]);
+    brain
+        .send(
+            Message::new("canvas_command", json!({"command": {"n": 1}})),
+            Some("living-room"),
+        )
+        .unwrap();
+    let (ack, _) = brain.recv();
+    assert_eq!(
+        ack.message.body["success"],
+        json!(true),
+        "tv slot was evicted"
+    );
+    let got = second.recv_until("canvas_command");
+    assert_eq!(got.message.body["command"]["n"], json!(1));
+}

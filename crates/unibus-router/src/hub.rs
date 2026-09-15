@@ -229,11 +229,17 @@ impl Hub {
 
         let outcome = self.connection_loop(&producer_id, &connection, reader);
 
-        if let Ok(mut conns) = self.conns.lock() {
+        // Ownership-checked removal: a node may hold several connections
+        // (JARVIS Sound dials status + remote input under one producer id).
+        // A dying connection must never evict the registration or socket
+        // slot of a connection that replaced it; registrations expire via
+        // heartbeat TTL, not via this cleanup.
+        if let Ok(mut conns) = self.conns.lock()
+            && conns
+                .get(&producer_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &(connection.clone() as Arc<dyn Sink>)))
+        {
             conns.remove(&producer_id);
-        }
-        if let Ok(mut registry) = self.registry.lock() {
-            registry.remove(&producer_id);
         }
         let Err(e) = outcome else {
             return Ok(());
