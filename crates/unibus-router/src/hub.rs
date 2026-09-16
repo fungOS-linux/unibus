@@ -58,6 +58,7 @@ pub struct Hub {
     registry: Arc<Mutex<NodeRegistry>>,
     conns: Arc<Mutex<HashMap<String, Arc<dyn Sink>>>>,
     plugins: Arc<Vec<Arc<dyn HubPlugin>>>,
+    verifier: Option<Arc<dyn unibus::OfflineVerifier>>,
 }
 
 impl Hub {
@@ -173,6 +174,7 @@ impl Hub {
             registry: Arc::new(Mutex::new(NodeRegistry::new())),
             conns: Arc::new(Mutex::new(HashMap::new())),
             plugins: Arc::new(Vec::new()),
+            verifier: None,
         })
     }
 
@@ -182,6 +184,62 @@ impl Hub {
         plugins.push(plugin);
         self.plugins = Arc::new(plugins);
         self
+    }
+
+    /// Install the fpl-auth signature verifier used by grants with an
+    /// `auth_subject`. Shared-token grants do not consult it.
+    #[must_use]
+    pub fn with_offline_verifier(mut self, verifier: Arc<dyn unibus::OfflineVerifier>) -> Self {
+        self.verifier = Some(verifier);
+        self
+    }
+
+    fn authenticate_registration(&self, config: &NodeConfig, envelope: &Envelope) -> Result<()> {
+        if let Some(subject) = config
+            .auth_subject
+            .as_deref()
+            .filter(|subject| !subject.trim().is_empty())
+        {
+            let verifier = self
+                .verifier
+                .as_ref()
+                .context("node requires fpl-auth but no OfflineVerifier is installed")?;
+            let now_s = now_ms() / 1_000;
+            let claims = verifier.verify(&envelope.token, now_s)?;
+            claims.validate(
+                &format!("unibus:{}", self.config.installation_id),
+                &self.config.installation_id,
+                now_s,
+            )?;
+            ensure!(claims.sub == subject, "fpl-auth subject mismatch");
+            ensure!(
+                claims.unibus_producer_id == envelope.producer_id,
+                "fpl-auth producer mismatch"
+            );
+            let grant = config.to_grant();
+            ensure!(
+                claims
+                    .unibus_capabilities
+                    .iter()
+                    .all(|value| grant.capabilities.contains(value))
+                    && claims
+                        .unibus_zones
+                        .iter()
+                        .all(|value| grant.zones.contains(value))
+                    && claims
+                        .unibus_screen_anchors
+                        .iter()
+                        .all(|value| grant.screen_anchors.contains(value)),
+                "fpl-auth assertion scope exceeds grant"
+            );
+            Ok(())
+        } else {
+            let token_file = config
+                .token_file
+                .as_deref()
+                .context("shared-token grant has no token_file")?;
+            auth::validate_token(token_file, &envelope.producer_id, &envelope.token)
+        }
     }
 
     /// Bind the listener and start the accept loop on a background thread.
@@ -275,7 +333,7 @@ impl Hub {
             .grants
             .get(&producer_id)
             .with_context(|| format!("ungranted producer '{producer_id}'"))?;
-        auth::validate_token(&node_config.token_file, &producer_id, &envelope.token)?;
+        self.authenticate_registration(node_config, &envelope)?;
         let node = self.admitted_registration(&producer_id, &envelope)?;
 
         {

@@ -51,7 +51,8 @@ pub enum RouteTarget {
 #[serde(deny_unknown_fields)]
 pub struct NodeConfig {
     pub producer_id: String,
-    pub token_file: PathBuf,
+    #[serde(default)]
+    pub token_file: Option<PathBuf>,
     #[serde(default)]
     pub zones: Vec<String>,
     pub capabilities: Vec<String>,
@@ -106,8 +107,12 @@ impl HubConfig {
             .parent()
             .ok_or_else(|| anyhow!("config parent missing"))?;
         for node in &mut config.nodes {
-            if node.token_file.is_relative() {
-                node.token_file = base.join(&node.token_file);
+            if node
+                .token_file
+                .as_ref()
+                .is_some_and(|path| path.is_relative())
+            {
+                node.token_file = node.token_file.as_ref().map(|path| base.join(path));
             }
         }
         config.validate()?;
@@ -152,6 +157,15 @@ impl HubConfig {
             ensure!(
                 !node.capabilities.is_empty(),
                 "node {} has no capabilities",
+                node.producer_id
+            );
+            ensure!(
+                node.token_file.is_some()
+                    || node
+                        .auth_subject
+                        .as_ref()
+                        .is_some_and(|subject| !subject.trim().is_empty()),
+                "node {} requires token_file or auth_subject",
                 node.producer_id
             );
             ensure!(

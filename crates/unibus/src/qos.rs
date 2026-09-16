@@ -36,11 +36,16 @@ impl Qos {
             // v1 tags
             "audio_capture_chunk" | "audio_playback_chunk" | "start_audio_capture" => Self::Stream,
             "presence_update" | "publish_presence" | "voice_identity" => Self::Snapshot,
-            // v2 namespaced prefixes
-            _ if kind.starts_with("audio.") || kind.starts_with("sensor.") => Self::Stream,
-            _ if kind.starts_with("presence.") || kind.starts_with("content.index") => {
-                Self::Snapshot
-            }
+            // v2 kinds are exact contract-owned policy. Unknown names default
+            // reliable; a prefix alone must never weaken delivery semantics.
+            "audio.capture_chunk"
+            | "audio.playback_chunk"
+            | "audio.start_capture"
+            | "sensor.sample" => Self::Stream,
+            "presence.snapshot"
+            | "presence.update"
+            | "content.index"
+            | "content.index_snapshot" => Self::Snapshot,
             _ => Self::Command,
         }
     }
@@ -74,5 +79,12 @@ mod tests {
     #[test]
     fn sensor_samples_stream() {
         assert_eq!(Qos::of_kind("sensor.sample"), Qos::Stream);
+    }
+
+    #[test]
+    fn unknown_namespaced_kinds_fail_safe_to_command() {
+        assert_eq!(Qos::of_kind("audio.novel"), Qos::Command);
+        assert_eq!(Qos::of_kind("presence.novel"), Qos::Command);
+        assert_eq!(Qos::of_kind("sensor.novel"), Qos::Command);
     }
 }

@@ -156,7 +156,7 @@ pub struct Scope<'a> {
 /// signature against pinned/cached fpl-auth JWKS (RS256), then hand the
 /// decoded claims to `NodeClaims::validate`. Implementations must reject
 /// unknown critical extensions and must not fall back to `alg: none`.
-pub trait OfflineVerifier {
+pub trait OfflineVerifier: Send + Sync {
     fn verify(&self, assertion: &str, now_unix_s: u64) -> Result<NodeClaims, AuthError>;
 }
 

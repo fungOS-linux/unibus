@@ -10,6 +10,7 @@ use serde_json::json;
 use unibus::envelope::{Envelope, Message};
 use unibus::framing::{read_frame, write_frame};
 use unibus::kinds::{self, Control};
+use unibus::{AuthError, NodeClaims, OfflineVerifier};
 use unibus_router::{
     Hub, HubConfig,
     plugin::{Envelope as PluginEnvelope, HubHandle, HubPlugin},
@@ -146,6 +147,29 @@ fn zones_for(producer_id: &str) -> Vec<&'static str> {
         "brain" => vec!["default", "living-room"],
         "tv" | "speaker" => vec!["living-room"],
         _ => vec!["default"],
+    }
+}
+
+struct TestVerifier;
+
+impl OfflineVerifier for TestVerifier {
+    fn verify(&self, assertion: &str, now: u64) -> Result<NodeClaims, AuthError> {
+        if assertion != "signed-assertion" {
+            return Err(AuthError::Malformed);
+        }
+        Ok(NodeClaims {
+            iss: "https://sso.fpl.dev".into(),
+            sub: "avery/tv".into(),
+            aud: "unibus:home".into(),
+            iat: now,
+            exp: now + 60,
+            jti: "assertion-1".into(),
+            unibus_installation_id: INSTALLATION.into(),
+            unibus_producer_id: "tv".into(),
+            unibus_zones: vec!["living-room".into()],
+            unibus_capabilities: vec!["display".into()],
+            unibus_screen_anchors: vec!["screen-tv".into()],
+        })
     }
 }
 
@@ -415,6 +439,51 @@ fn bad_token_is_rejected() {
     );
     write_frame(&mut node.stream, &register, &[]).unwrap();
     assert!(read_frame(&mut node.stream).is_err());
+}
+
+#[test]
+fn offline_verifier_authenticates_and_binds_claim_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("hub.json"),
+        r#"{
+          "installation_id":"home",
+          "listen":"127.0.0.1:0",
+          "nodes":[{
+            "producer_id":"tv",
+            "auth_subject":"avery/tv",
+            "zones":["living-room"],
+            "capabilities":["display"],
+            "screen_anchors":["screen-tv"]
+          }]
+        }"#,
+    )
+    .unwrap();
+    let config = HubConfig::read(&dir.path().join("hub.json")).unwrap();
+    let hub = Arc::new(
+        Hub::new(config)
+            .unwrap()
+            .with_offline_verifier(Arc::new(TestVerifier)),
+    );
+    let addr = hub.start().unwrap();
+    let mut stream = TcpStream::connect(addr).unwrap();
+    let register = Envelope::new(
+        INSTALLATION,
+        "tv",
+        None,
+        "signed-assertion",
+        Message::new(
+            kinds::V1_REGISTER,
+            json!({
+                "capabilities": ["display"],
+                "zones": ["living-room"],
+                "screen_anchors": ["screen-tv"]
+            }),
+        ),
+    );
+    write_frame(&mut stream, &register, &[]).unwrap();
+    let (reply, _) = read_frame(&mut stream).unwrap();
+    assert_eq!(reply.message.body["success"], json!(true));
 }
 
 #[test]

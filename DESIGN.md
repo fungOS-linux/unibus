@@ -76,6 +76,8 @@ scheduler: commands occupy a reliable FIFO and fail loudly at capacity,
 streams evict replaceable work rather than building latency, and snapshots
 replace an older queued value with the same producer/kind/destination key.
 Non-command frames are discarded if their TTL expires before transmission.
+QoS mappings are exact, contract-owned names; unknown kinds fail safe to the
+reliable command class rather than inheriting weaker semantics from a prefix.
 
 QUIC is the preferred transport (`quinn`): built-in TLS 1.3, per-stream
 ordering with no cross-stream head-of-line blocking, unreliable datagrams
@@ -104,6 +106,11 @@ Identity root is **fpl-auth** (`sso.fpl.dev`), not an invented PKI:
   both transports (QUIC, TCP-over-SSH) enforce the same plane.
 - Shared bearer tokens are consumed only by registration and are cleared at
   the authenticated session boundary; relayed envelopes never contain them.
+
+The router accepts an injected `OfflineVerifier` and binds its verified claims
+to the configured subject, producer, audience, installation, assertion lifetime,
+and granted capability/zone/anchor scope. Signature/JWKS ownership remains in
+the fpl-auth integration rather than being duplicated in this crate.
 
 ## Invariants
 

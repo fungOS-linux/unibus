@@ -48,7 +48,7 @@ cargo fmt --all
 | `src/registry.rs` | Live node registry: heartbeats (3 s / 10 s TTL), deterministic selection |
 | `src/config.rs` | A v1 `router.json` loads unchanged; v2 adds routes table + site/role |
 | `src/plugin.rs` | `HubPlugin`/`Sink` seam — stateful domain behavior (like presence fan-out) lives with its domain |
-| `src/auth.rs` | v1 shared-token mode until the fpl-auth `OfflineVerifier` lands; credentials terminate at registration |
+| `src/auth.rs` | shared-token compatibility plus verifier-backed fpl-auth sessions; credentials terminate at registration |
 | `tests/hub.rs` | End-to-end over loopback: routing, echoes, anchors, plugin gating |
 
 Routing is configuration: the hub maps message kinds to capabilities via a
@@ -60,6 +60,11 @@ Schema-v2 node grants must explicitly list `publishes` plus their permitted
 peers with no publish policy retain compatibility. Plaintext TCP binds are
 loopback-only unless `allow_insecure_lan: true` is explicitly set; use a secure
 tunnel for remote TCP deployments.
+
+Nodes with `auth_subject` are authenticated through the `OfflineVerifier`
+installed with `Hub::with_offline_verifier`; subject, audience, installation,
+producer, lifetime, and asserted grant scope are all bound before registration.
+Nodes without `auth_subject` remain in explicit shared-token compatibility mode.
 
 Related: `FuturePresentLabs/dock` — `docs/unibus.md` (Canvas's use of the
 bus); JARVIS — `jarvis-router`, `jarvis-edge`, `distributed-topology.md`.
