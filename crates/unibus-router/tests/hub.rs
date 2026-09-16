@@ -71,6 +71,36 @@ impl TestHub {
         self.node_with_token(producer_id, capabilities, anchors, TOKEN)
     }
 
+    fn node_at_schema(&self, schema: u32, producer_id: &str, capabilities: &[&str]) -> Node {
+        let stream = TcpStream::connect(self.addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut node = Node {
+            stream,
+            producer_id: producer_id.to_string(),
+        };
+        let mut register = Envelope::new(
+            INSTALLATION,
+            producer_id,
+            None,
+            TOKEN,
+            Message::new(
+                kinds::V1_REGISTER,
+                json!({
+                    "capabilities": capabilities,
+                    "zones": zones_for(producer_id),
+                    "screen_anchors": [],
+                }),
+            ),
+        );
+        register.schema_version = schema;
+        write_frame(&mut node.stream, &register, &[]).unwrap();
+        let (reply, _) = read_frame(&mut node.stream).unwrap();
+        assert!(reply.message.body["success"].as_bool() == Some(true));
+        node
+    }
+
     fn node_with_token(
         &self,
         producer_id: &str,
@@ -558,4 +588,28 @@ fn producers_learn_when_a_peer_goes_offline() {
     let offline = watcher.recv_until("unibus.node_state");
     assert_eq!(offline.message.body["producer_id"], json!("tv"));
     assert_eq!(offline.message.body["online"], json!(false));
+}
+
+#[test]
+fn v1_peers_never_see_hub_advisories() {
+    let hub = start("");
+    let mut v1 = hub.node_at_schema(1, "tv", &["display"]);
+    v1.stream
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    let mut brain = hub.node("brain", &["canvas.command"], &[]);
+    brain
+        .send(
+            Message::new("canvas_command", json!({"command": {}})),
+            Some("nowhere"),
+        )
+        .unwrap();
+    // tv must see nothing: not the unroutable-command ack (goes to brain),
+    // not the schema-2 brain's presence in advisories.
+    assert!(read_frame(&mut v1.stream).is_err());
+    // v2 peers DO get advisories: tv's own offline announcement reaches brain.
+    drop(v1);
+    let online = brain.recv_until("unibus.node_state");
+    assert_eq!(online.message.body["producer_id"], json!("tv"));
+    assert_eq!(online.message.body["online"], json!(false));
 }

@@ -36,6 +36,7 @@ struct RegisterBody {
 
 struct LiveConnection {
     writer: Arc<Mutex<TcpStream>>,
+    schema_version: std::sync::atomic::AtomicU32,
 }
 
 impl Sink for LiveConnection {
@@ -45,6 +46,10 @@ impl Sink for LiveConnection {
             .lock()
             .map_err(|_| anyhow::anyhow!("connection mutex poisoned"))?;
         write_frame(&mut *stream, envelope, payload).context("push frame to node")
+    }
+    fn peer_schema(&self) -> u32 {
+        self.schema_version
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -202,6 +207,7 @@ impl Hub {
         }
         let connection = Arc::new(LiveConnection {
             writer: Arc::new(Mutex::new(stream)),
+            schema_version: std::sync::atomic::AtomicU32::new(envelope.schema_version),
         });
         {
             let mut conns = self
@@ -377,7 +383,10 @@ impl Hub {
             Err(_) => return,
         };
         for (node, conn) in conns.iter() {
-            if node != producer_id {
+            // v1 peers carry a closed message enum: an unknown kind would
+            // kill their read loop. Only v2 (routed-opaque) peers may see
+            // hub advisories.
+            if node != producer_id && conn.peer_schema() >= 2 {
                 let _ = conn.push(&envelope, &[]);
             }
         }

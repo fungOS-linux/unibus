@@ -18,6 +18,9 @@ pub struct EdgeNode {
     pub capabilities: Vec<String>,
     pub screen_anchors: Vec<String>,
     pub site: String,
+    /// Wire schema the peer presented at registration: 1 = closed jarvis
+    /// enum (rejects unknown kinds), 2 = routed-opaque unibus reader.
+    pub schema_version: u32,
     pub connected_at: Instant,
     pub last_heartbeat: Instant,
     pub token_authenticated: bool,
@@ -31,6 +34,7 @@ impl EdgeNode {
             capabilities: grant.capabilities.clone(),
             screen_anchors: grant.screen_anchors.clone(),
             site: grant.site.clone(),
+            schema_version: 2,
             connected_at: Instant::now(),
             last_heartbeat: Instant::now(),
             token_authenticated: true,

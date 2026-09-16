@@ -26,6 +26,11 @@ pub struct Delivery {
 /// Anything a hub-side message can be pushed into.
 pub trait Sink: Send + Sync {
     fn push(&self, envelope: &Envelope, payload: &[u8]) -> Result<()>;
+    /// Wire schema of the peer behind this sink; hub advisories (like
+    /// node_state) only go to peers that can parse unknown kinds.
+    fn peer_schema(&self) -> u32 {
+        1
+    }
 }
 
 /// A cloneable view of the hub passed to plugins.
