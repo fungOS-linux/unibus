@@ -45,7 +45,9 @@ impl Sink for LiveConnection {
             .writer
             .lock()
             .map_err(|_| anyhow::anyhow!("connection mutex poisoned"))?;
-        write_frame(&mut *stream, envelope, payload).context("push frame to node")
+        let mut outbound = envelope.clone();
+        outbound.token.clear();
+        write_frame(&mut *stream, &outbound, payload).context("push frame to node")
     }
     fn peer_schema(&self) -> u32 {
         self.schema_version
@@ -64,6 +66,100 @@ pub struct Hub {
 }
 
 impl Hub {
+    fn admitted_registration(&self, producer_id: &str, envelope: &Envelope) -> Result<EdgeNode> {
+        ensure!(
+            envelope.producer_id == producer_id,
+            "authenticated producer {producer_id} attempted to send as {}",
+            envelope.producer_id
+        );
+        let grant = self
+            .grants
+            .get(producer_id)
+            .with_context(|| format!("ungranted producer '{producer_id}'"))?
+            .to_grant();
+        let claimed: RegisterBody =
+            serde_json::from_value(serde_json::Value::Object(envelope.message.body.clone()))
+                .context("parse register body")?;
+        ensure!(
+            claimed
+                .capabilities
+                .iter()
+                .all(|value| grant.capabilities.contains(value)),
+            "node {producer_id} claimed an ungranted capability"
+        );
+        ensure!(
+            claimed
+                .zones
+                .iter()
+                .all(|value| grant.zones.contains(value)),
+            "node {producer_id} claimed an ungranted zone"
+        );
+        ensure!(
+            claimed
+                .screen_anchors
+                .iter()
+                .all(|value| grant.screen_anchors.contains(value)),
+            "node {producer_id} claimed an ungranted screen anchor"
+        );
+        let mut node = EdgeNode::from_claims(
+            &grant,
+            claimed.zones,
+            claimed.capabilities,
+            claimed.screen_anchors,
+        );
+        node.schema_version = envelope.schema_version;
+        Ok(node)
+    }
+
+    fn authorize_publish(&self, producer_id: &str, envelope: &Envelope) -> Result<()> {
+        let grant = self
+            .grants
+            .get(producer_id)
+            .context("authenticated producer vanished from grants")?
+            .to_grant();
+        // Frozen schema-v1 peers predate publish scopes. Schema v2 is the
+        // fail-closed boundary where explicit ingress policy is mandatory.
+        if envelope.schema_version == unibus::SCHEMA_VERSION_V1 && grant.publishes.is_empty() {
+            return Ok(());
+        }
+        ensure!(
+            grant.may_publish(&envelope.message.kind),
+            "node {producer_id} may not publish {}",
+            envelope.message.kind
+        );
+        if let Some(anchor) = &envelope.target_screen {
+            ensure!(
+                grant.publish_screen_anchors.contains(anchor),
+                "node {producer_id} may not target screen {anchor}"
+            );
+        } else if let Some(target) = self.routes.get(&envelope.message.kind) {
+            match target {
+                RouteTarget::Capability { .. } => {
+                    let zone = envelope.destination.as_deref().unwrap_or(DEFAULT_ZONE);
+                    ensure!(
+                        grant.publish_zones.iter().any(|allowed| allowed == zone),
+                        "node {producer_id} may not target zone {zone}"
+                    );
+                }
+                RouteTarget::Producer => {
+                    let target = envelope
+                        .destination
+                        .as_deref()
+                        .context("producer-addressed publication requires destination")?;
+                    ensure!(
+                        grant
+                            .publish_producers
+                            .iter()
+                            .any(|allowed| allowed == target),
+                        "node {producer_id} may not target producer {target}"
+                    );
+                }
+                RouteTarget::AnyHolder { .. } => {}
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(config: HubConfig) -> Result<Self> {
         let grants = config
             .nodes
@@ -184,26 +280,15 @@ impl Hub {
             .grants
             .get(&producer_id)
             .with_context(|| format!("ungranted producer '{producer_id}'"))?;
-        let grant = node_config.to_grant();
-
         auth::validate_token(&node_config.token_file, &producer_id, &envelope.token)?;
-
-        let claimed: RegisterBody =
-            serde_json::from_value(serde_json::Value::Object(envelope.message.body.clone()))
-                .context("parse register body")?;
-        for capability in &claimed.capabilities {
-            ensure!(
-                grant.can(capability),
-                "node {producer_id} claimed ungranted capability {capability}"
-            );
-        }
+        let node = self.admitted_registration(&producer_id, &envelope)?;
 
         {
             let mut registry = self
                 .registry
                 .lock()
                 .map_err(|_| anyhow::anyhow!("registry mutex poisoned"))?;
-            registry.upsert(EdgeNode::new(&grant));
+            registry.upsert(node.clone());
         }
         let connection = Arc::new(LiveConnection {
             writer: Arc::new(Mutex::new(stream)),
@@ -218,7 +303,7 @@ impl Hub {
         }
         info!(
             "node '{producer_id}' registered: capabilities {:?}, zones {:?}, anchors {:?}",
-            claimed.capabilities, claimed.zones, claimed.screen_anchors
+            node.capabilities, node.zones, node.screen_anchors
         );
 
         let reply = Envelope::new(
@@ -274,7 +359,7 @@ impl Hub {
         mut reader: TcpStream,
     ) -> Result<()> {
         loop {
-            let (envelope, payload) = match read_frame(&mut reader) {
+            let (mut envelope, payload) = match read_frame(&mut reader) {
                 Ok(frame) => frame,
                 // macOS reports an SO_RCVTIMEO expiry as EAGAIN/WouldBlock,
                 // not TimedOut: idle polls are normal, only EOF ends a
@@ -289,6 +374,14 @@ impl Hub {
                 Err(e) => return Err(e.into()),
             };
             envelope.validate(&self.config.installation_id, now_ms())?;
+            ensure!(
+                envelope.producer_id == producer_id,
+                "authenticated producer {producer_id} attempted to send as {}",
+                envelope.producer_id
+            );
+            // Authentication material terminates at this session boundary and
+            // must never be exposed to plugins or downstream nodes.
+            envelope.token.clear();
 
             let mut handled_reply = None;
             match kinds::classify(&envelope.message.kind) {
@@ -303,42 +396,43 @@ impl Hub {
                 }
                 Control::Reply => continue,
                 Control::Register => {
-                    // Mid-session re-registration: same grant, refresh state.
+                    // Mid-session re-registration repeats the same subset
+                    // validation as the initial registration.
+                    let node = self.admitted_registration(producer_id, &envelope)?;
                     self.registry
                         .lock()
                         .map_err(|_| anyhow::anyhow!("registry mutex poisoned"))?
-                        .upsert(EdgeNode::new(
-                            &self
-                                .grants
-                                .get(producer_id)
-                                .context("node vanished from grants")?
-                                .to_grant(),
-                        ));
+                        .upsert(node);
                     continue;
                 }
                 Control::Data => {
-                    let hub = self.handle();
-                    let mut plugin_err = None;
-                    let mut plugin_hit = false;
-                    for plugin in self.plugins.iter() {
-                        match plugin.handle(&hub, producer_id, &envelope, &payload) {
-                            Ok(true) => {
-                                plugin_hit = true;
-                                break;
-                            }
-                            Ok(false) => {}
-                            Err(e) => {
-                                warn!("plugin failed for '{producer_id}': {e:#}");
-                                plugin_err = Some(e.to_string());
-                                break;
+                    if let Err(error) = self.authorize_publish(producer_id, &envelope) {
+                        warn!("publication rejected for '{producer_id}': {error:#}");
+                        handled_reply = Some((false, Some(error.to_string())));
+                    } else {
+                        let hub = self.handle();
+                        let mut plugin_err = None;
+                        let mut plugin_hit = false;
+                        for plugin in self.plugins.iter() {
+                            match plugin.handle(&hub, producer_id, &envelope, &payload) {
+                                Ok(true) => {
+                                    plugin_hit = true;
+                                    break;
+                                }
+                                Ok(false) => {}
+                                Err(e) => {
+                                    warn!("plugin failed for '{producer_id}': {e:#}");
+                                    plugin_err = Some(e.to_string());
+                                    break;
+                                }
                             }
                         }
-                    }
-                    if let Some(message) = plugin_err {
-                        handled_reply = Some((false, Some(message)));
-                    } else if !plugin_hit {
-                        handled_reply =
-                            Some(self.route_default(producer_id, &envelope, &payload)?);
+                        if let Some(message) = plugin_err {
+                            handled_reply = Some((false, Some(message)));
+                        } else if !plugin_hit {
+                            handled_reply =
+                                Some(self.route_default(producer_id, &envelope, &payload)?);
+                        }
                     }
                 }
             }

@@ -28,11 +28,27 @@ pub struct EdgeNode {
 
 impl EdgeNode {
     pub fn new(grant: &NodeGrant) -> Self {
+        Self::from_claims(
+            grant,
+            grant.zones.clone(),
+            grant.capabilities.clone(),
+            grant.screen_anchors.clone(),
+        )
+    }
+
+    /// Construct live state from the registration's admitted subset, while
+    /// retaining topology attributes owned exclusively by the static grant.
+    pub fn from_claims(
+        grant: &NodeGrant,
+        zones: Vec<String>,
+        capabilities: Vec<String>,
+        screen_anchors: Vec<String>,
+    ) -> Self {
         Self {
             producer_id: grant.producer_id.clone(),
-            zones: grant.zones.clone(),
-            capabilities: grant.capabilities.clone(),
-            screen_anchors: grant.screen_anchors.clone(),
+            zones,
+            capabilities,
+            screen_anchors,
             site: grant.site.clone(),
             schema_version: 2,
             connected_at: Instant::now(),
@@ -187,6 +203,10 @@ mod tests {
             auth_subject: String::new(),
             zones: vec![zone.into()],
             capabilities: vec![cap.into()],
+            publishes: Vec::new(),
+            publish_zones: Vec::new(),
+            publish_screen_anchors: Vec::new(),
+            publish_producers: Vec::new(),
             screen_anchors: Vec::new(),
             site: "default".into(),
             role: Default::default(),

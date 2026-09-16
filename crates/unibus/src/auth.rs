@@ -44,6 +44,7 @@ pub enum AuthError {
     Expired { now: u64, exp: u64 },
     NotYetValid { now: u64, iat: u64 },
     TooLongLived { ttl: u64 },
+    InvalidLifetime { iat: u64, exp: u64 },
     AudienceMismatch { expected: String, got: String },
     InstallationMismatch { expected: String, got: String },
     EmptyClaim(&'static str),
@@ -59,6 +60,9 @@ impl fmt::Display for AuthError {
             }
             Self::TooLongLived { ttl } => {
                 write!(f, "assertion ttl {ttl}s exceeds the revocation window")
+            }
+            Self::InvalidLifetime { iat, exp } => {
+                write!(f, "assertion expiry {exp} is not after issuance {iat}")
             }
             Self::AudienceMismatch { expected, got } => {
                 write!(f, "audience mismatch: expected {expected}, got {got}")
@@ -104,6 +108,12 @@ impl NodeClaims {
             return Err(AuthError::InstallationMismatch {
                 expected: expected_installation.to_owned(),
                 got: self.unibus_installation_id.clone(),
+            });
+        }
+        if self.exp <= self.iat {
+            return Err(AuthError::InvalidLifetime {
+                iat: self.iat,
+                exp: self.exp,
             });
         }
         if self.exp.saturating_add(MAX_SKEW_SECS) < now_unix_s {
@@ -202,6 +212,12 @@ mod tests {
         assert!(matches!(
             c.validate("unibus:home", "home", now),
             Err(AuthError::TooLongLived { .. })
+        ));
+        let mut c = claims(now);
+        c.exp = c.iat;
+        assert!(matches!(
+            c.validate("unibus:home", "home", now),
+            Err(AuthError::InvalidLifetime { .. })
         ));
         let c = claims(now + 60);
         assert!(matches!(

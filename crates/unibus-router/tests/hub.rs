@@ -35,10 +35,10 @@ fn hub_config(dir: &std::path::Path, extra_routes: &str) -> HubConfig {
             {{"kind": "audio_playback_chunk", "target": {{"mode": "capability", "name": "audio_output"}}}}
         ],
         "nodes": [
-            {{"producer_id": "brain", "token_file": "token", "zones": ["default", "living-room"], "capabilities": ["display", "audio_output", "presence_capture", "canvas.command"]}},
-            {{"producer_id": "tv", "token_file": "token", "zones": ["living-room"], "capabilities": ["display"], "screen_anchors": ["screen-tv"]}},
-            {{"producer_id": "studio", "token_file": "token", "zones": ["default"], "capabilities": ["display"], "screen_anchors": ["screen-left"]}},
-            {{"producer_id": "speaker", "token_file": "token", "zones": ["living-room"], "capabilities": ["audio_output"]}}
+            {{"producer_id": "brain", "token_file": "token", "zones": ["default", "living-room"], "capabilities": ["display", "audio_output", "presence_capture", "canvas.command"], "publishes": ["canvas_command", "audio_playback_chunk", "test.publish", "fr_response", "mute_request", "totally_unknown_kind"], "publish_zones": ["default", "living-room", "nowhere"], "publish_screen_anchors": ["screen-tv", "screen-left"], "publish_producers": ["tv", "ghost"]}},
+            {{"producer_id": "tv", "token_file": "token", "zones": ["living-room"], "capabilities": ["display"], "screen_anchors": ["screen-tv"], "publishes": []}},
+            {{"producer_id": "studio", "token_file": "token", "zones": ["default"], "capabilities": ["display"], "screen_anchors": ["screen-left"], "publishes": ["test.publish"], "publish_zones": ["default"]}},
+            {{"producer_id": "speaker", "token_file": "token", "zones": ["living-room"], "capabilities": ["audio_output"], "publishes": []}}
         ]
     }}"#
     );
@@ -215,6 +215,10 @@ fn canvas_command_reaches_display_in_destination_zone() {
 
     let received = tv.recv_until("canvas_command");
     assert_eq!(
+        received.token, "",
+        "credentials crossed the session boundary"
+    );
+    assert_eq!(
         received.message.body["command"]["op"].as_str(),
         Some("ping")
     );
@@ -243,7 +247,10 @@ fn sender_is_never_echoed_and_stream_gets_no_ack() {
         .stream
         .set_read_timeout(Some(Duration::from_millis(200)))
         .unwrap();
-    assert!(read_frame(&mut brain.stream).is_err());
+    while let Ok((received, _)) = read_frame(&mut brain.stream) {
+        assert_ne!(received.message.kind, "canvas_command");
+        assert_ne!(kinds::classify(&received.message.kind), Control::Reply);
+    }
 
     // stream-class messages are fire-and-forget: no ack
     let pcm = vec![9u8; 64];
@@ -330,6 +337,58 @@ fn ungranted_capability_claim_is_rejected() {
     // either an explicit rejection or the hub closing the socket: both loud
     if let Ok((reply, _)) = outcome {
         assert_eq!(reply.message.body["success"], json!(false));
+    }
+}
+
+#[test]
+fn ungranted_zone_and_anchor_claims_are_rejected() {
+    let hub = start("");
+    for body in [
+        json!({"capabilities": ["display"], "zones": ["bedroom"], "screen_anchors": []}),
+        json!({"capabilities": ["display"], "zones": ["living-room"], "screen_anchors": ["screen-rogue"]}),
+    ] {
+        let mut stream = TcpStream::connect(hub.addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let register = Envelope::new(
+            INSTALLATION,
+            "tv",
+            None,
+            TOKEN,
+            Message::new(kinds::V1_REGISTER, body),
+        );
+        write_frame(&mut stream, &register, &[]).unwrap();
+        assert!(read_frame(&mut stream).is_err());
+    }
+}
+
+#[test]
+fn authenticated_connection_cannot_spoof_producer() {
+    let hub = start("");
+    let mut brain = hub.node("brain", &["canvas.command"], &[]);
+    let mut tv = hub.node("tv", &["display"], &["screen-tv"]);
+    let spoofed = Envelope::new(
+        INSTALLATION,
+        "studio",
+        Some("living-room"),
+        TOKEN,
+        Message::new("canvas_command", json!({"command": 1})),
+    );
+    write_frame(&mut brain.stream, &spoofed, &[]).unwrap();
+    brain
+        .stream
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    while let Ok((received, _)) = read_frame(&mut brain.stream) {
+        assert_ne!(received.message.kind, "canvas_command");
+        assert_ne!(kinds::classify(&received.message.kind), Control::Reply);
+    }
+    tv.stream
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    while let Ok((received, _)) = read_frame(&mut tv.stream) {
+        assert_ne!(received.message.kind, "canvas_command");
     }
 }
 

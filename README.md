@@ -47,12 +47,18 @@ cargo fmt --all
 | `src/registry.rs` | Live node registry: heartbeats (3 s / 10 s TTL), deterministic selection |
 | `src/config.rs` | A v1 `router.json` loads unchanged; v2 adds routes table + site/role |
 | `src/plugin.rs` | `HubPlugin`/`Sink` seam — stateful domain behavior (like presence fan-out) lives with its domain |
-| `src/auth.rs` | v1 shared-token mode until the fpl-auth `OfflineVerifier` lands |
+| `src/auth.rs` | v1 shared-token mode until the fpl-auth `OfflineVerifier` lands; credentials terminate at registration |
 | `tests/hub.rs` | End-to-end over loopback: routing, echoes, anchors, plugin gating |
 
 Routing is configuration: the hub maps message kinds to capabilities via a
 `routes` table; unknown kinds without a plugin fail loudly. The hub parses
 only `register` — every data body stays opaque.
+
+Schema-v2 node grants must explicitly list `publishes` plus their permitted
+`publish_zones`, `publish_screen_anchors`, and `publish_producers`. Frozen v1
+peers with no publish policy retain compatibility. Plaintext TCP binds are
+loopback-only unless `allow_insecure_lan: true` is explicitly set; use a secure
+tunnel for remote TCP deployments.
 
 Related: `FuturePresentLabs/dock` — `docs/unibus.md` (Canvas's use of the
 bus); JARVIS — `jarvis-router`, `jarvis-edge`, `distributed-topology.md`.

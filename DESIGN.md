@@ -52,6 +52,9 @@ capability or domain must never require an L1 release.
   screen anchors, `site` (`home-lan`, `wan`, ...), `role`
   (`origin` | `cache` | `edge`). Claims outside the grant are rejected.
   Unknown grant fields are rejected — a typo must not widen scope.
+- Schema-v2 grants also separate ingress authority from receiver capability:
+  exact `publishes` and allowed zone, screen-anchor, and producer destinations.
+  A receiver capability never implicitly grants permission to publish.
 - Heartbeats keep registrations alive (send 3 s, TTL 10 s); dead nodes are
   pruned and must re-register (re-authenticated). A dead node cannot
   heartbeat back to life.
@@ -93,12 +96,15 @@ Identity root is **fpl-auth** (`sso.fpl.dev`), not an invented PKI:
   failure.
 - TLS proves the channel; the assertion proves the application identity —
   both transports (QUIC, TCP-over-SSH) enforce the same plane.
+- Shared bearer tokens are consumed only by registration and are cleared at
+  the authenticated session boundary; relayed envelopes never contain them.
 
 ## Invariants
 
 - One authoritative hub per installation; no elected failover in v1.
 - Hub listens on tailnet (+ loopback for the brain itself); TCP fallback is
-  loopback-only behind SSH tunnels.
+  loopback-only behind SSH tunnels. Plaintext wildcard TCP requires the
+  explicit legacy compatibility switch `allow_insecure_lan`.
 - A disconnected node is simply absent from selection; the installation
   keeps operating. Degrade loudly, never silently to the wrong screen.
 - Adapters expose unconfigured/unsupported backends as *unavailable* — never

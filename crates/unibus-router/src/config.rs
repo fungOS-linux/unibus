@@ -12,6 +12,10 @@ use unibus::grants::{NodeGrant, Role};
 pub struct HubConfig {
     pub installation_id: String,
     pub listen: String,
+    /// Compatibility escape hatch for plaintext TCP on a trusted LAN. Remote
+    /// deployments should use QUIC/TLS or put loopback TCP behind a tunnel.
+    #[serde(default)]
+    pub allow_insecure_lan: bool,
     /// Retained from v1 config files; the hub keeps no on-disk state in v1.
     #[serde(default)]
     pub state_dir: Option<PathBuf>,
@@ -51,6 +55,17 @@ pub struct NodeConfig {
     #[serde(default)]
     pub zones: Vec<String>,
     pub capabilities: Vec<String>,
+    /// Exact data message kinds this node may publish. Empty retains v1
+    /// compatibility only; schema-v2 sessions fail closed.
+    #[serde(default)]
+    pub publishes: Vec<String>,
+    /// Address scopes usable by published messages.
+    #[serde(default)]
+    pub publish_zones: Vec<String>,
+    #[serde(default)]
+    pub publish_screen_anchors: Vec<String>,
+    #[serde(default)]
+    pub publish_producers: Vec<String>,
     #[serde(default)]
     pub screen_anchors: Vec<String>,
     #[serde(default)]
@@ -70,6 +85,10 @@ impl NodeConfig {
             auth_subject: self.auth_subject.clone().unwrap_or_default(),
             zones: self.zones.clone(),
             capabilities: self.capabilities.clone(),
+            publishes: self.publishes.clone(),
+            publish_zones: self.publish_zones.clone(),
+            publish_screen_anchors: self.publish_screen_anchors.clone(),
+            publish_producers: self.publish_producers.clone(),
             screen_anchors: self.screen_anchors.clone(),
             site: self.site.clone().unwrap_or_else(|| "default".into()),
             role: self.role.unwrap_or_default(),
@@ -112,8 +131,12 @@ impl HubConfig {
             .map_err(|e| anyhow!("invalid listen address {}: {e}", self.listen))?;
         ensure!(
             parsed.ip().is_loopback() || parsed.ip().is_unspecified(),
-            "TCP hub must bind loopback or 0.0.0.0 (trusted LAN); got {}",
+            "TCP hub must bind loopback or 0.0.0.0; got {}",
             parsed.ip()
+        );
+        ensure!(
+            !parsed.ip().is_unspecified() || self.allow_insecure_lan,
+            "plaintext TCP wildcard bind requires allow_insecure_lan=true"
         );
         ensure!(
             !self.nodes.is_empty(),
@@ -189,19 +212,30 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(
             dir.path(),
-            r#"{"installation_id":"home","listen":"0.0.0.0:18790","nodes":[{"producer_id":"n","token_file":"token","zones":["z"],"capabilities":["display"]}]}"#,
+            r#"{"installation_id":"home","listen":"0.0.0.0:18790","allow_insecure_lan":true,"nodes":[{"producer_id":"n","token_file":"token","zones":["z"],"capabilities":["display"]}]}"#,
         );
         assert!(HubConfig::read(&path).is_ok());
     }
 
     #[test]
-    fn rejects_specific_non_loopback_bind() {
+    fn rejects_wildcard_without_explicit_insecure_policy() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(
             dir.path(),
-            r#"{"installation_id":"home","listen":"0.0.0.0:18790","nodes":[]}"#,
+            r#"{"installation_id":"home","listen":"0.0.0.0:18790","nodes":[{"producer_id":"n","token_file":"token","zones":["z"],"capabilities":["display"]}]}"#,
         );
         assert!(HubConfig::read(&path).is_err());
+    }
+
+    #[test]
+    fn rejects_specific_non_loopback_bind_for_the_bind_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            r#"{"installation_id":"home","listen":"192.0.2.1:18790","nodes":[{"producer_id":"n","token_file":"token","zones":["z"],"capabilities":["display"]}]}"#,
+        );
+        let error = HubConfig::read(&path).unwrap_err().to_string();
+        assert!(error.contains("must bind loopback or 0.0.0.0"), "{error}");
     }
 
     #[test]

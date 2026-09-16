@@ -45,6 +45,14 @@ pub struct NodeGrant {
     #[serde(default)]
     pub capabilities: Vec<String>,
     #[serde(default)]
+    pub publishes: Vec<String>,
+    #[serde(default)]
+    pub publish_zones: Vec<String>,
+    #[serde(default)]
+    pub publish_screen_anchors: Vec<String>,
+    #[serde(default)]
+    pub publish_producers: Vec<String>,
+    #[serde(default)]
     pub screen_anchors: Vec<String>,
     /// Declared topology label: `home-lan`, `wan`, `agora-lan`, ...
     #[serde(default = "default_site")]
@@ -105,8 +113,16 @@ impl NodeGrant {
                 &self.capabilities,
                 is_valid_namespaced_name as fn(&str) -> bool,
             ),
+            ("message_kind", &self.publishes, is_valid_namespaced_name),
             ("zone", &self.zones, is_valid_slug),
+            ("publish_zone", &self.publish_zones, is_valid_slug),
             ("screen_anchor", &self.screen_anchors, is_valid_slug),
+            (
+                "publish_screen_anchor",
+                &self.publish_screen_anchors,
+                is_valid_slug,
+            ),
+            ("publish_producer", &self.publish_producers, is_valid_slug),
         ] {
             let mut seen = std::collections::BTreeSet::new();
             for value in values {
@@ -144,8 +160,12 @@ impl NodeGrant {
         for value in self
             .capabilities
             .iter()
+            .chain(self.publishes.iter())
             .chain(self.zones.iter())
+            .chain(self.publish_zones.iter())
             .chain(self.screen_anchors.iter())
+            .chain(self.publish_screen_anchors.iter())
+            .chain(self.publish_producers.iter())
         {
             if value.trim().is_empty() || value.len() > 128 {
                 return Err(GrantError::InvalidName {
@@ -183,6 +203,10 @@ impl NodeGrant {
     pub fn admits_capabilities(&self, claimed: &[String]) -> bool {
         claimed.iter().all(|c| self.can(c))
     }
+
+    pub fn may_publish(&self, kind: &str) -> bool {
+        self.publishes.iter().any(|allowed| allowed == kind)
+    }
 }
 
 #[cfg(test)]
@@ -195,6 +219,10 @@ mod tests {
             auth_subject: "avery/home-pi".into(),
             zones: vec!["living-room".into()],
             capabilities: vec!["canvas.display".into(), "audio.out".into()],
+            publishes: vec!["canvas.command".into()],
+            publish_zones: vec!["living-room".into()],
+            publish_screen_anchors: vec!["screen-tv".into()],
+            publish_producers: vec![],
             screen_anchors: vec!["screen-tv".into()],
             site: "home-lan".into(),
             role: Role::Edge,
@@ -254,6 +282,10 @@ mod slug_tests {
             auth_subject: "avery/home-pi".into(),
             zones: vec!["living-room".into()],
             capabilities: vec!["display".into()],
+            publishes: vec![],
+            publish_zones: vec![],
+            publish_screen_anchors: vec![],
+            publish_producers: vec![],
             screen_anchors: vec!["screen-tv".into()],
             site: "home-lan".into(),
             role: Role::Edge,
