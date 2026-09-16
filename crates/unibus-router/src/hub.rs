@@ -337,7 +337,24 @@ impl Hub {
 
     /// Bind and block forever (daemon entry point).
     pub fn serve(self: Arc<Self>) -> Result<()> {
+        let quic = self
+            .config
+            .quic
+            .as_ref()
+            .map(|quic| {
+                let address = quic
+                    .listen
+                    .parse()
+                    .with_context(|| format!("parse QUIC listen address {}", quic.listen))?;
+                let tls = crate::quic::server_config_from_pem(&quic.cert_file, &quic.key_file)?;
+                Ok::<_, anyhow::Error>((address, tls))
+            })
+            .transpose()?;
         self.start()?;
+        if let Some((address, tls)) = quic {
+            let actual = self.start_quic(address, tls)?;
+            info!("unibus QUIC/TLS hub listening on {actual}");
+        }
         loop {
             thread::sleep(Duration::from_secs(3600));
         }

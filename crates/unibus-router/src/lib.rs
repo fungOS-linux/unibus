@@ -15,7 +15,7 @@ pub mod plugin;
 pub mod quic;
 pub mod registry;
 
-pub use config::{HubConfig, NodeConfig, RouteRule, RouteTarget};
+pub use config::{HubConfig, NodeConfig, QuicConfig, RouteRule, RouteTarget};
 pub use hub::Hub;
 pub use plugin::HubPlugin;
 pub use plugin::{Delivery, HubHandle, Sink};

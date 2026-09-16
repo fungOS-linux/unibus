@@ -67,10 +67,19 @@ installed with `Hub::with_offline_verifier`; subject, audience, installation,
 producer, lifetime, and asserted grant scope are all bound before registration.
 Nodes without `auth_subject` remain in explicit shared-token compatibility mode.
 
-The library hub can additionally listen over QUIC/TLS with `Hub::start_quic`;
-see [`docs/quic-runbook.md`](docs/quic-runbook.md). The standalone
-`unibus-hub` command remains the v1-compatible TCP entry point until certificate
-paths and lifecycle policy are added to its configuration interface.
+The library hub can additionally listen over QUIC/TLS with `Hub::start_quic`.
+The standalone `unibus-hub` starts both TCP and QUIC when configuration includes:
+
+```json
+"quic": {
+  "listen": "0.0.0.0:18791",
+  "cert_file": "tls/server.pem",
+  "key_file": "tls/server-key.pem"
+}
+```
+
+Certificate paths resolve relative to `router.json`; invalid or missing PEM
+material stops startup. See [`docs/quic-runbook.md`](docs/quic-runbook.md).
 
 Related: `FuturePresentLabs/dock` — `docs/unibus.md` (Canvas's use of the
 bus); JARVIS — `jarvis-router`, `jarvis-edge`, `distributed-topology.md`.

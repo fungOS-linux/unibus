@@ -1,6 +1,7 @@
 //! QUIC/TLS transport primitives using the same Unibus frame codec.
 
 use std::net::{SocketAddr, UdpSocket};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
@@ -23,6 +24,32 @@ pub fn server_config(
 ) -> Result<quinn::ServerConfig> {
     quinn::ServerConfig::with_single_cert(certificates, private_key)
         .context("build QUIC TLS server configuration")
+}
+
+/// Load a PEM certificate chain and one private key for the CLI/config path.
+pub fn server_config_from_pem(cert_file: &Path, key_file: &Path) -> Result<quinn::ServerConfig> {
+    let cert_bytes = std::fs::read(cert_file)
+        .with_context(|| format!("read QUIC certificate {}", cert_file.display()))?;
+    let certificates = rustls_pemfile::certs(&mut cert_bytes.as_slice())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| format!("parse QUIC certificate {}", cert_file.display()))?;
+    if certificates.is_empty() {
+        return Err(anyhow!(
+            "QUIC certificate file {} contains no certificates",
+            cert_file.display()
+        ));
+    }
+    let key_bytes = std::fs::read(key_file)
+        .with_context(|| format!("read QUIC private key {}", key_file.display()))?;
+    let private_key = rustls_pemfile::private_key(&mut key_bytes.as_slice())
+        .with_context(|| format!("parse QUIC private key {}", key_file.display()))?
+        .with_context(|| {
+            format!(
+                "QUIC private key file {} contains no key",
+                key_file.display()
+            )
+        })?;
+    server_config(certificates, private_key)
 }
 
 pub fn client_config(root_certificates: RootCertStore) -> Result<quinn::ClientConfig> {
@@ -171,6 +198,18 @@ mod tests {
         let (decoded, payload) = decode_frame(&encoded).unwrap();
         assert_eq!(decoded, envelope);
         assert!(payload.is_empty());
+    }
+
+    #[test]
+    fn pem_server_configuration_loads_from_disk() {
+        let CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cert_file = dir.path().join("server.pem");
+        let key_file = dir.path().join("server-key.pem");
+        std::fs::write(&cert_file, cert.pem()).unwrap();
+        std::fs::write(&key_file, signing_key.serialize_pem()).unwrap();
+        assert!(server_config_from_pem(&cert_file, &key_file).is_ok());
     }
 
     #[tokio::test(flavor = "multi_thread")]

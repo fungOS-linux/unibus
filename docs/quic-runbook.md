@@ -1,7 +1,8 @@
 # QUIC transport runbook
 
 The library hub exposes `Hub::start_quic(address, server_config)` alongside the
-v1-compatible TCP listener. QUIC is TLS 1.3-capable through Quinn/Rustls and
+v1-compatible TCP listener. The `unibus-hub` CLI starts QUIC automatically when
+its configuration contains a `quic` object. QUIC is TLS 1.3-capable through Quinn/Rustls and
 uses the same envelope codec, registration assertions, grants, routing, and
 plugins as TCP.
 
@@ -21,15 +22,30 @@ token or fpl-auth assertion, and every later envelope is bound to that producer.
 
 ## Start and verify
 
-1. Build the normal `Hub` and install the fpl-auth `OfflineVerifier` when any
+1. Add the listener and PEM paths to `router.json`:
+
+   ```json
+   "quic": {
+     "listen": "0.0.0.0:18791",
+     "cert_file": "tls/server.pem",
+     "key_file": "tls/server-key.pem"
+   }
+   ```
+
+   Paths are relative to the configuration file. Missing, empty, or malformed
+   PEM material fails startup before the daemon enters its service loop.
+
+2. Run `unibus-hub /path/to/router.json`. The configured TCP compatibility
+   listener and QUIC listener start together.
+3. When embedding, build the normal `Hub` and install the fpl-auth `OfflineVerifier` when any
    grant uses `auth_subject`.
-2. Call `start_quic` with an explicit UDP address and TLS server configuration.
-3. Connect a `QuicEndpoint` client using the pinned roots and expected DNS name.
-4. Send `register` as the first frame and require a successful `reply`.
-5. Send a command and verify its correlated reply and destination delivery.
-6. Send a small `audio.playback_chunk` or `presence.snapshot`; `QuicPeer::send`
+4. Call `start_quic` with an explicit UDP address and TLS server configuration.
+5. Connect a `QuicEndpoint` client using the pinned roots and expected DNS name.
+6. Send `register` as the first frame and require a successful `reply`.
+7. Send a command and verify its correlated reply and destination delivery.
+8. Send a small `audio.playback_chunk` or `presence.snapshot`; `QuicPeer::send`
    should report `Datagram` when the negotiated maximum permits it.
-7. Send a frame larger than the negotiated datagram size and verify it reports
+9. Send a frame larger than the negotiated datagram size and verify it reports
    `OneWayStream`.
 
 Commands and datagram-ineligible messages use reliable one-way streams. QUIC

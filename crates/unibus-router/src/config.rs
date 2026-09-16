@@ -16,12 +16,24 @@ pub struct HubConfig {
     /// deployments should use QUIC/TLS or put loopback TCP behind a tunnel.
     #[serde(default)]
     pub allow_insecure_lan: bool,
+    /// Optional production QUIC/TLS listener. Paths are resolved relative to
+    /// the configuration file.
+    #[serde(default)]
+    pub quic: Option<QuicConfig>,
     /// Retained from v1 config files; the hub keeps no on-disk state in v1.
     #[serde(default)]
     pub state_dir: Option<PathBuf>,
     #[serde(default)]
     pub routes: Vec<RouteRule>,
     pub nodes: Vec<NodeConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuicConfig {
+    pub listen: String,
+    pub cert_file: PathBuf,
+    pub key_file: PathBuf,
 }
 
 /// One routing rule: an opaque data kind delivered to nodes holding a
@@ -115,6 +127,14 @@ impl HubConfig {
                 node.token_file = node.token_file.as_ref().map(|path| base.join(path));
             }
         }
+        if let Some(quic) = &mut config.quic {
+            if quic.cert_file.is_relative() {
+                quic.cert_file = base.join(&quic.cert_file);
+            }
+            if quic.key_file.is_relative() {
+                quic.key_file = base.join(&quic.key_file);
+            }
+        }
         config.validate()?;
         Ok(config)
     }
@@ -143,6 +163,16 @@ impl HubConfig {
             !parsed.ip().is_unspecified() || self.allow_insecure_lan,
             "plaintext TCP wildcard bind requires allow_insecure_lan=true"
         );
+        if let Some(quic) = &self.quic {
+            let _: std::net::SocketAddr = quic
+                .listen
+                .parse()
+                .map_err(|error| anyhow!("invalid QUIC listen address {}: {error}", quic.listen))?;
+            ensure!(
+                !quic.cert_file.as_os_str().is_empty() && !quic.key_file.as_os_str().is_empty(),
+                "QUIC cert_file and key_file are required"
+            );
+        }
         ensure!(
             !self.nodes.is_empty(),
             "at least one node grant is required"
@@ -268,5 +298,23 @@ mod tests {
                ],"nodes":[{"producer_id":"n","token_file":"token","zones":["z"],"capabilities":["display"]}]}"#,
         );
         assert!(HubConfig::read(&path).is_err());
+    }
+
+    #[test]
+    fn quic_paths_resolve_relative_to_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            r#"{
+              "installation_id":"home",
+              "listen":"127.0.0.1:0",
+              "quic":{"listen":"0.0.0.0:18791","cert_file":"tls/server.pem","key_file":"tls/server-key.pem"},
+              "nodes":[{"producer_id":"n","token_file":"token","zones":["z"],"capabilities":["display"]}]
+            }"#,
+        );
+        let config = HubConfig::read(&path).unwrap();
+        let quic = config.quic.unwrap();
+        assert_eq!(quic.cert_file, dir.path().join("tls/server.pem"));
+        assert_eq!(quic.key_file, dir.path().join("tls/server-key.pem"));
     }
 }
