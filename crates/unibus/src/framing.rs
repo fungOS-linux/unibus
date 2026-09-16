@@ -58,10 +58,21 @@ pub fn read_frame(reader: &mut impl Read) -> Result<(Envelope, Vec<u8>), FrameEr
     let mut buf = vec![0u8; total as usize];
     reader.read_exact(&mut buf)?;
 
-    let json_end = find_json_end(&buf).ok_or(FrameError::NoJson)?;
+    decode_frame(&buf)
+}
+
+/// Decode the frame body after its four-byte stream length prefix. QUIC
+/// datagrams use this same body so envelope semantics have one codec.
+pub fn decode_frame(buf: &[u8]) -> Result<(Envelope, Vec<u8>), FrameError> {
+    if buf.is_empty() || buf.len() > MAX_FRAME as usize {
+        return Err(FrameError::TooLarge {
+            total: u32::try_from(buf.len()).unwrap_or(u32::MAX),
+        });
+    }
+    let json_end = find_json_end(buf).ok_or(FrameError::NoJson)?;
     let envelope: Envelope = serde_json::from_slice(&buf[..json_end])
         .map_err(|e| FrameError::Envelope(EnvelopeError::Malformed(e.to_string())))?;
-    let actual = total as usize - json_end;
+    let actual = buf.len() - json_end;
     if actual != envelope.payload_bytes {
         return Err(FrameError::JsonSizeMismatch {
             declared: envelope.payload_bytes,
@@ -88,6 +99,16 @@ pub fn write_frame(
     envelope: &Envelope,
     payload: &[u8],
 ) -> Result<(), FrameError> {
+    let frame = encode_frame(envelope, payload)?;
+    writer.write_all(&(frame.len() as u32).to_be_bytes())?;
+    writer.write_all(&frame)?;
+    writer.flush()?;
+    Ok(())
+}
+
+/// Encode a frame body without the TCP length prefix. Used directly for QUIC
+/// datagrams and inside a QUIC stream whose FIN supplies the boundary.
+pub fn encode_frame(envelope: &Envelope, payload: &[u8]) -> Result<Vec<u8>, FrameError> {
     if payload.len() != envelope.payload_bytes {
         return Err(FrameError::JsonSizeMismatch {
             declared: envelope.payload_bytes,
@@ -101,11 +122,10 @@ pub fn write_frame(
             total: total as u32,
         });
     }
-    writer.write_all(&(total as u32).to_be_bytes())?;
-    writer.write_all(&header)?;
-    writer.write_all(payload)?;
-    writer.flush()?;
-    Ok(())
+    let mut frame = Vec::with_capacity(total);
+    frame.extend_from_slice(&header);
+    frame.extend_from_slice(payload);
+    Ok(frame)
 }
 
 /// Locate the end of the JSON object that starts the frame, so the binary

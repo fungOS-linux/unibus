@@ -45,6 +45,7 @@ cargo fmt --all
 |---|---|
 | `src/hub.rs` | Accept loop, registration/auth, ack policy, anchor/zone/capability relay |
 | `src/outbound.rs` | Bounded per-peer command/stream/snapshot scheduler and writer |
+| `src/quic.rs` | Quinn/Rustls endpoint, explicit trust configuration, datagram/stream mapping |
 | `src/registry.rs` | Live node registry: heartbeats (3 s / 10 s TTL), deterministic selection |
 | `src/config.rs` | A v1 `router.json` loads unchanged; v2 adds routes table + site/role |
 | `src/plugin.rs` | `HubPlugin`/`Sink` seam — stateful domain behavior (like presence fan-out) lives with its domain |
@@ -65,6 +66,11 @@ Nodes with `auth_subject` are authenticated through the `OfflineVerifier`
 installed with `Hub::with_offline_verifier`; subject, audience, installation,
 producer, lifetime, and asserted grant scope are all bound before registration.
 Nodes without `auth_subject` remain in explicit shared-token compatibility mode.
+
+The library hub can additionally listen over QUIC/TLS with `Hub::start_quic`;
+see [`docs/quic-runbook.md`](docs/quic-runbook.md). The standalone
+`unibus-hub` command remains the v1-compatible TCP entry point until certificate
+paths and lifecycle policy are added to its configuration interface.
 
 Related: `FuturePresentLabs/dock` — `docs/unibus.md` (Canvas's use of the
 bus); JARVIS — `jarvis-router`, `jarvis-edge`, `distributed-topology.md`.

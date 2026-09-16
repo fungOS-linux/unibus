@@ -84,6 +84,11 @@ ordering with no cross-stream head-of-line blocking, unreliable datagrams
 (RFC 9221), connection migration. The TCP fallback reuses the framing above
 unchanged; envelope semantics are identical on either.
 
+The implemented QUIC adapter uses the JSON-plus-binary frame body directly:
+small eligible stream/snapshot messages use negotiated datagrams, while
+commands and datagram-ineligible frames use reliable one-way streams. Both
+enter the same authenticated hub session and routing code as TCP.
+
 ## Auth — aligned with fpl-auth
 
 Identity root is **fpl-auth** (`sso.fpl.dev`), not an invented PKI:

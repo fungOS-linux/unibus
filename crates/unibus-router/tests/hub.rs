@@ -14,6 +14,7 @@ use unibus::{AuthError, NodeClaims, OfflineVerifier};
 use unibus_router::{
     Hub, HubConfig,
     plugin::{Envelope as PluginEnvelope, HubHandle, HubPlugin},
+    quic::{QuicEndpoint, client_config, server_config},
 };
 
 const INSTALLATION: &str = "home";
@@ -740,4 +741,79 @@ fn v1_peers_never_see_hub_advisories() {
     let online = brain.recv_until("unibus.node_state");
     assert_eq!(online.message.body["producer_id"], json!("tv"));
     assert_eq!(online.message.body["online"], json!(false));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn quic_hub_routes_through_the_same_session_contract() {
+    use rcgen::{CertifiedKey, generate_simple_self_signed};
+    use rustls::RootCertStore;
+    use rustls::pki_types::PrivateKeyDer;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = hub_config(dir.path(), "");
+    let hub = Arc::new(Hub::new(config).unwrap());
+    let CertifiedKey { cert, signing_key } =
+        generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let address = hub
+        .start_quic(
+            "127.0.0.1:0".parse().unwrap(),
+            server_config(
+                vec![cert.der().clone()],
+                PrivateKeyDer::Pkcs8(signing_key.serialize_der().into()),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(cert.der().clone()).unwrap();
+    let client = QuicEndpoint::client(
+        "127.0.0.1:0".parse().unwrap(),
+        client_config(roots).unwrap(),
+    )
+    .unwrap();
+
+    let tv = client.connect(address, "localhost").await.unwrap();
+    let register_tv = Envelope::new(
+        INSTALLATION,
+        "tv",
+        None,
+        TOKEN,
+        Message::new(
+            kinds::V1_REGISTER,
+            json!({"capabilities":["display"], "zones":["living-room"], "screen_anchors":["screen-tv"]}),
+        ),
+    );
+    tv.send(&register_tv, &[]).await.unwrap();
+    assert_eq!(tv.recv().await.unwrap().0.message.kind, kinds::V1_REPLY);
+
+    let brain = client.connect(address, "localhost").await.unwrap();
+    let register_brain = Envelope::new(
+        INSTALLATION,
+        "brain",
+        None,
+        TOKEN,
+        Message::new(
+            kinds::V1_REGISTER,
+            json!({"capabilities":["canvas.command"], "zones":["default", "living-room"], "screen_anchors":[]}),
+        ),
+    );
+    brain.send(&register_brain, &[]).await.unwrap();
+    assert_eq!(brain.recv().await.unwrap().0.message.kind, kinds::V1_REPLY);
+
+    let command = Envelope::new(
+        INSTALLATION,
+        "brain",
+        Some("living-room"),
+        TOKEN,
+        Message::new("canvas_command", json!({"command": 42})),
+    );
+    brain.send(&command, &[]).await.unwrap();
+    loop {
+        let (received, _) = tv.recv().await.unwrap();
+        if received.message.kind == "canvas_command" {
+            assert_eq!(received.message.body["command"], json!(42));
+            assert!(received.token.is_empty());
+            break;
+        }
+    }
 }

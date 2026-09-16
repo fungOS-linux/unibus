@@ -19,6 +19,7 @@ use crate::auth;
 use crate::config::{HubConfig, NodeConfig, RouteTarget};
 use crate::outbound::OutboundScheduler;
 use crate::plugin::{Delivery, HubHandle, HubPlugin, Sink};
+use crate::quic::{QuicEndpoint, QuicPeer};
 use crate::registry::{EdgeNode, NodeRegistry};
 
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -38,6 +39,25 @@ struct RegisterBody {
 struct LiveConnection {
     outbound: OutboundScheduler,
     schema_version: std::sync::atomic::AtomicU32,
+}
+
+struct LiveQuicConnection {
+    sender: tokio::sync::mpsc::Sender<(Envelope, Vec<u8>)>,
+    schema_version: u32,
+}
+
+impl Sink for LiveQuicConnection {
+    fn push(&self, envelope: &Envelope, payload: &[u8]) -> Result<()> {
+        let mut envelope = envelope.clone();
+        envelope.token.clear();
+        self.sender
+            .try_send((envelope, payload.to_vec()))
+            .map_err(|error| anyhow::anyhow!("QUIC outbound queue rejected frame: {error}"))
+    }
+
+    fn peer_schema(&self) -> u32 {
+        self.schema_version
+    }
 }
 
 impl Sink for LiveConnection {
@@ -261,6 +281,60 @@ impl Hub {
         Ok(addr)
     }
 
+    /// Start the same hub over QUIC/TLS. Certificate and trust policy are
+    /// explicit caller inputs; application identity remains the register
+    /// assertion validated by the normal session path.
+    pub fn start_quic(
+        self: &Arc<Self>,
+        address: SocketAddr,
+        config: quinn::ServerConfig,
+    ) -> Result<SocketAddr> {
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let hub = self.clone();
+        thread::Builder::new()
+            .name("unibus-quic".into())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Runtime::new() {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(anyhow::anyhow!(error)));
+                        return;
+                    }
+                };
+                runtime.block_on(async move {
+                    let endpoint = match QuicEndpoint::server(address, config) {
+                        Ok(endpoint) => endpoint,
+                        Err(error) => {
+                            let _ = ready_tx.send(Err(error));
+                            return;
+                        }
+                    };
+                    let local_addr = endpoint.local_addr();
+                    if ready_tx.send(local_addr).is_err() {
+                        return;
+                    }
+                    loop {
+                        match endpoint.accept().await {
+                            Ok(peer) => {
+                                let hub = hub.clone();
+                                tokio::spawn(async move {
+                                    if let Err(error) = hub.handle_quic_peer(peer).await {
+                                        debug!("QUIC connection closed: {error:#}");
+                                    }
+                                });
+                            }
+                            Err(error) => {
+                                warn!("QUIC accept error: {error:#}");
+                                return;
+                            }
+                        }
+                    }
+                });
+            })
+            .context("start QUIC hub thread")?;
+        ready_rx.recv().context("QUIC startup thread stopped")?
+    }
+
     /// Bind and block forever (daemon entry point).
     pub fn serve(self: Arc<Self>) -> Result<()> {
         self.start()?;
@@ -405,6 +479,88 @@ impl Hub {
         Ok(())
     }
 
+    async fn handle_quic_peer(&self, peer: QuicPeer) -> Result<()> {
+        let (envelope, _payload) = peer.recv().await.context("read QUIC register frame")?;
+        envelope.validate(&self.config.installation_id, now_ms())?;
+        ensure!(
+            kinds::classify(&envelope.message.kind) == Control::Register,
+            "first QUIC message must be register"
+        );
+        let producer_id = envelope.producer_id.clone();
+        let node_config = self
+            .grants
+            .get(&producer_id)
+            .with_context(|| format!("ungranted producer '{producer_id}'"))?;
+        self.authenticate_registration(node_config, &envelope)?;
+        let node = self.admitted_registration(&producer_id, &envelope)?;
+
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<(Envelope, Vec<u8>)>(128);
+        let outbound_peer = peer.clone();
+        tokio::spawn(async move {
+            while let Some((envelope, payload)) = receiver.recv().await {
+                if outbound_peer.send(&envelope, &payload).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let connection = Arc::new(LiveQuicConnection {
+            sender,
+            schema_version: envelope.schema_version,
+        });
+        self.registry
+            .lock()
+            .map_err(|_| anyhow::anyhow!("registry mutex poisoned"))?
+            .upsert(node);
+        self.conns
+            .lock()
+            .map_err(|_| anyhow::anyhow!("connections mutex poisoned"))?
+            .insert(producer_id.clone(), connection.clone());
+
+        let reply = Envelope::new(
+            &self.config.installation_id,
+            &producer_id,
+            None,
+            "",
+            Message::new(
+                kinds::V1_REPLY,
+                kinds::reply_body(true, Some("registered".into()), Some(envelope.request_id)),
+            ),
+        );
+        connection.push(&reply, &[])?;
+        self.broadcast_node_state(&producer_id, true);
+
+        let outcome = loop {
+            match peer.recv().await {
+                Ok((envelope, payload)) => {
+                    if let Err(error) = self.handle_registered_frame(
+                        &producer_id,
+                        connection.as_ref(),
+                        envelope,
+                        payload,
+                    ) {
+                        break Err(error);
+                    }
+                }
+                Err(error) => break Err(error),
+            }
+        };
+
+        let was_owner = self.conns.lock().is_ok_and(|mut conns| {
+            let current: Arc<dyn Sink> = connection.clone();
+            let owned = conns
+                .get(&producer_id)
+                .is_some_and(|registered| Arc::ptr_eq(registered, &current));
+            if owned {
+                conns.remove(&producer_id);
+            }
+            owned
+        });
+        if was_owner {
+            self.broadcast_node_state(&producer_id, false);
+        }
+        outcome
+    }
+
     fn connection_loop(
         &self,
         producer_id: &str,
@@ -412,7 +568,7 @@ impl Hub {
         mut reader: TcpStream,
     ) -> Result<()> {
         loop {
-            let (mut envelope, payload) = match read_frame(&mut reader) {
+            let (envelope, payload) = match read_frame(&mut reader) {
                 Ok(frame) => frame,
                 // macOS reports an SO_RCVTIMEO expiry as EAGAIN/WouldBlock,
                 // not TimedOut: idle polls are normal, only EOF ends a
@@ -426,88 +582,97 @@ impl Hub {
                 }
                 Err(e) => return Err(e.into()),
             };
-            envelope.validate(&self.config.installation_id, now_ms())?;
-            ensure!(
-                envelope.producer_id == producer_id,
-                "authenticated producer {producer_id} attempted to send as {}",
-                envelope.producer_id
-            );
-            // Authentication material terminates at this session boundary and
-            // must never be exposed to plugins or downstream nodes.
-            envelope.token.clear();
+            self.handle_registered_frame(producer_id, connection.as_ref(), envelope, payload)?;
+        }
+    }
 
-            let mut handled_reply = None;
-            match kinds::classify(&envelope.message.kind) {
-                Control::Heartbeat => {
-                    let ok = self
-                        .registry
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("registry mutex poisoned"))?
-                        .heartbeat(producer_id);
-                    ensure!(ok, "heartbeat from unregistered node {producer_id}");
-                    continue;
-                }
-                Control::Reply => continue,
-                Control::Register => {
-                    // Mid-session re-registration repeats the same subset
-                    // validation as the initial registration.
-                    let node = self.admitted_registration(producer_id, &envelope)?;
-                    self.registry
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("registry mutex poisoned"))?
-                        .upsert(node);
-                    continue;
-                }
-                Control::Data => {
-                    if let Err(error) = self.authorize_publish(producer_id, &envelope) {
-                        warn!("publication rejected for '{producer_id}': {error:#}");
-                        handled_reply = Some((false, Some(error.to_string())));
-                    } else {
-                        let hub = self.handle();
-                        let mut plugin_err = None;
-                        let mut plugin_hit = false;
-                        for plugin in self.plugins.iter() {
-                            match plugin.handle(&hub, producer_id, &envelope, &payload) {
-                                Ok(true) => {
-                                    plugin_hit = true;
-                                    break;
-                                }
-                                Ok(false) => {}
-                                Err(e) => {
-                                    warn!("plugin failed for '{producer_id}': {e:#}");
-                                    plugin_err = Some(e.to_string());
-                                    break;
-                                }
+    fn handle_registered_frame(
+        &self,
+        producer_id: &str,
+        connection: &dyn Sink,
+        mut envelope: Envelope,
+        payload: Vec<u8>,
+    ) -> Result<()> {
+        envelope.validate(&self.config.installation_id, now_ms())?;
+        ensure!(
+            envelope.producer_id == producer_id,
+            "authenticated producer {producer_id} attempted to send as {}",
+            envelope.producer_id
+        );
+        envelope.token.clear();
+
+        let mut handled_reply = None;
+        match kinds::classify(&envelope.message.kind) {
+            Control::Heartbeat => {
+                let ok = self
+                    .registry
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("registry mutex poisoned"))?
+                    .heartbeat(producer_id);
+                ensure!(ok, "heartbeat from unregistered node {producer_id}");
+                return Ok(());
+            }
+            Control::Reply => return Ok(()),
+            Control::Register => {
+                // Mid-session re-registration repeats the same subset
+                // validation as the initial registration.
+                let node = self.admitted_registration(producer_id, &envelope)?;
+                self.registry
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("registry mutex poisoned"))?
+                    .upsert(node);
+                return Ok(());
+            }
+            Control::Data => {
+                if let Err(error) = self.authorize_publish(producer_id, &envelope) {
+                    warn!("publication rejected for '{producer_id}': {error:#}");
+                    handled_reply = Some((false, Some(error.to_string())));
+                } else {
+                    let hub = self.handle();
+                    let mut plugin_err = None;
+                    let mut plugin_hit = false;
+                    for plugin in self.plugins.iter() {
+                        match plugin.handle(&hub, producer_id, &envelope, &payload) {
+                            Ok(true) => {
+                                plugin_hit = true;
+                                break;
+                            }
+                            Ok(false) => {}
+                            Err(e) => {
+                                warn!("plugin failed for '{producer_id}': {e:#}");
+                                plugin_err = Some(e.to_string());
+                                break;
                             }
                         }
-                        if let Some(message) = plugin_err {
-                            handled_reply = Some((false, Some(message)));
-                        } else if !plugin_hit {
-                            handled_reply =
-                                Some(self.route_default(producer_id, &envelope, &payload)?);
-                        }
+                    }
+                    if let Some(message) = plugin_err {
+                        handled_reply = Some((false, Some(message)));
+                    } else if !plugin_hit {
+                        handled_reply =
+                            Some(self.route_default(producer_id, &envelope, &payload)?);
                     }
                 }
             }
-
-            // Ack policy mirrors jarvis-router v1: stream data is
-            // fire-and-forget, everything else gets a reply.
-            let is_stream = Qos::of_kind(&envelope.message.kind) == Qos::Stream;
-            if !is_stream {
-                let (success, message) = handled_reply.unwrap_or((true, None));
-                let reply = Envelope::new(
-                    &self.config.installation_id,
-                    producer_id,
-                    None,
-                    "",
-                    Message::new(
-                        kinds::V1_REPLY,
-                        kinds::reply_body(success, message, Some(envelope.request_id.clone())),
-                    ),
-                );
-                connection.push(&reply, &[])?;
-            }
         }
+
+        // Ack policy mirrors jarvis-router v1: stream data is
+        // fire-and-forget, everything else gets a reply.
+        let is_stream = Qos::of_kind(&envelope.message.kind) == Qos::Stream;
+        if !is_stream {
+            let (success, message) = handled_reply.unwrap_or((true, None));
+            let reply = Envelope::new(
+                &self.config.installation_id,
+                producer_id,
+                None,
+                "",
+                Message::new(
+                    kinds::V1_REPLY,
+                    kinds::reply_body(success, message, Some(envelope.request_id.clone())),
+                ),
+            );
+            connection.push(&reply, &[])?;
+        }
+        Ok(())
     }
 
     /// Producer liveness, pushed to every connected node so consumers can

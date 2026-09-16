@@ -12,6 +12,7 @@ pub mod config;
 pub mod hub;
 mod outbound;
 pub mod plugin;
+pub mod quic;
 pub mod registry;
 
 pub use config::{HubConfig, NodeConfig, RouteRule, RouteTarget};
