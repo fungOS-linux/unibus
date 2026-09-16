@@ -44,6 +44,7 @@ cargo fmt --all
 | Path | What |
 |---|---|
 | `src/hub.rs` | Accept loop, registration/auth, ack policy, anchor/zone/capability relay |
+| `src/outbound.rs` | Bounded per-peer command/stream/snapshot scheduler and writer |
 | `src/registry.rs` | Live node registry: heartbeats (3 s / 10 s TTL), deterministic selection |
 | `src/config.rs` | A v1 `router.json` loads unchanged; v2 adds routes table + site/role |
 | `src/plugin.rs` | `HubPlugin`/`Sink` seam — stateful domain behavior (like presence fan-out) lives with its domain |

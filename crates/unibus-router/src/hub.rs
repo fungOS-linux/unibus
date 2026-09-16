@@ -11,12 +11,13 @@ use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 use unibus::envelope::{Envelope, Message, now_ms};
-use unibus::framing::{read_frame, write_frame};
+use unibus::framing::read_frame;
 use unibus::kinds::{self, Control};
 use unibus::qos::Qos;
 
 use crate::auth;
 use crate::config::{HubConfig, NodeConfig, RouteTarget};
+use crate::outbound::OutboundScheduler;
 use crate::plugin::{Delivery, HubHandle, HubPlugin, Sink};
 use crate::registry::{EdgeNode, NodeRegistry};
 
@@ -35,19 +36,13 @@ struct RegisterBody {
 }
 
 struct LiveConnection {
-    writer: Arc<Mutex<TcpStream>>,
+    outbound: OutboundScheduler,
     schema_version: std::sync::atomic::AtomicU32,
 }
 
 impl Sink for LiveConnection {
     fn push(&self, envelope: &Envelope, payload: &[u8]) -> Result<()> {
-        let mut stream = self
-            .writer
-            .lock()
-            .map_err(|_| anyhow::anyhow!("connection mutex poisoned"))?;
-        let mut outbound = envelope.clone();
-        outbound.token.clear();
-        write_frame(&mut *stream, &outbound, payload).context("push frame to node")
+        self.outbound.push(envelope, payload)
     }
     fn peer_schema(&self) -> u32 {
         self.schema_version
@@ -291,7 +286,7 @@ impl Hub {
             registry.upsert(node.clone());
         }
         let connection = Arc::new(LiveConnection {
-            writer: Arc::new(Mutex::new(stream)),
+            outbound: OutboundScheduler::spawn(stream)?,
             schema_version: std::sync::atomic::AtomicU32::new(envelope.schema_version),
         });
         {

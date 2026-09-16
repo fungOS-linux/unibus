@@ -71,6 +71,12 @@ L1 maps every message kind to exactly one class (v1 tags and v2 names agree):
 | stream | audio PCM, sensor samples | latency over completeness; datagram when it fits, else one-way stream the reader may reset; stale bytes dropped, never queued |
 | snapshot | presence, index/state facts | latest-value replaceable; fire-and-forget; stale → *unknown*, never *empty* |
 
+The TCP hub implements these semantics with a bounded per-peer outbound
+scheduler: commands occupy a reliable FIFO and fail loudly at capacity,
+streams evict replaceable work rather than building latency, and snapshots
+replace an older queued value with the same producer/kind/destination key.
+Non-command frames are discarded if their TTL expires before transmission.
+
 QUIC is the preferred transport (`quinn`): built-in TLS 1.3, per-stream
 ordering with no cross-stream head-of-line blocking, unreliable datagrams
 (RFC 9221), connection migration. The TCP fallback reuses the framing above
