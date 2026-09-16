@@ -828,6 +828,76 @@ impl HubHandle {
     }
 }
 
+#[cfg(test)]
+mod delivery_liveness_tests {
+    use super::*;
+
+    struct AcceptingSink;
+
+    impl Sink for AcceptingSink {
+        fn push(&self, _: &Envelope, _: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn peer_schema(&self) -> u32 {
+            2
+        }
+    }
+
+    #[test]
+    fn successful_delivery_refreshes_receive_only_node() {
+        let mut registry = NodeRegistry::new();
+        registry.upsert(EdgeNode {
+            producer_id: "receiver".into(),
+            zones: vec!["default".into()],
+            capabilities: vec!["audio_input".into()],
+            screen_anchors: Vec::new(),
+            site: "default".into(),
+            schema_version: 2,
+            connected_at: Instant::now(),
+            last_heartbeat: Instant::now() - Duration::from_secs(9),
+            token_authenticated: true,
+        });
+        let registry = Arc::new(Mutex::new(registry));
+        let handle = HubHandle {
+            installation_id: "home".into(),
+            grants: Arc::new(HashMap::new()),
+            registry: registry.clone(),
+            conns: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let delivered = handle.deliver(
+            vec![(
+                Delivery {
+                    producer_id: "receiver".into(),
+                    site: "default".into(),
+                    zones: vec!["default".into()],
+                },
+                Arc::new(AcceptingSink),
+            )],
+            &Envelope::new(
+                "home",
+                "sender",
+                Some("default".into()),
+                "",
+                Message::new("audio_capture_chunk", serde_json::json!({})),
+            ),
+            &[],
+        );
+
+        assert_eq!(delivered, 1);
+        assert!(
+            registry
+                .lock()
+                .unwrap()
+                .get("receiver")
+                .unwrap()
+                .last_heartbeat
+                .elapsed()
+                < Duration::from_secs(1)
+        );
+    }
+}
+
 impl HubHandle {
     /// Every live holder, installation-wide, excluding `exclude` (the source).
     pub fn send_to_holders(
@@ -848,6 +918,15 @@ impl HubHandle {
 /// Internal helpers with concrete connection types (trait objects can't
 /// name them and the sink signature needs the subtraction helper).
 impl HubHandle {
+    fn record_delivery(&self, producer_id: &str) {
+        // A successful enqueue proves that this connection is still usable.
+        // Receive-only peers (notably JARVIS remote audio input) otherwise
+        // expire despite continuously draining frames from the hub.
+        if let Ok(mut registry) = self.registry.lock() {
+            let _ = registry.heartbeat(producer_id);
+        }
+    }
+
     fn deliver(
         &self,
         targets: Vec<(Delivery, Arc<dyn Sink>)>,
@@ -859,6 +938,7 @@ impl HubHandle {
             let mut forwarded = envelope.clone();
             forwarded.destination = Some(node.producer_id.clone());
             if conn.push(&forwarded, payload).is_ok() {
+                self.record_delivery(&node.producer_id);
                 delivered += 1;
             }
         }
@@ -871,9 +951,10 @@ impl HubHandle {
                 .select_for_screen(anchor)
                 .map(|n| n.producer_id.clone())
         });
-        match selected.and_then(|id| self.connection(&id)) {
-            Some(conn) => {
+        match selected.and_then(|id| self.connection(&id).map(|conn| (id, conn))) {
+            Some((producer_id, conn)) => {
                 if conn.push(envelope, payload).is_ok() {
+                    self.record_delivery(&producer_id);
                     1
                 } else {
                     0
