@@ -35,17 +35,23 @@ impl Qos {
         match kind {
             // v1 tags
             "audio_capture_chunk" | "audio_playback_chunk" | "start_audio_capture" => Self::Stream,
-            "presence_update" | "publish_presence" | "voice_identity" => Self::Snapshot,
+            "presence_update" | "publish_presence" | "voice_identity" | "audio_level" => {
+                Self::Snapshot
+            }
             // v2 kinds are exact contract-owned policy. Unknown names default
             // reliable; a prefix alone must never weaken delivery semantics.
             "audio.capture_chunk"
             | "audio.playback_chunk"
             | "audio.start_capture"
+            | "input.gamepad_state"
+            | "rlcd.decision.v1"
             | "sensor.sample" => Self::Stream,
             "presence.snapshot"
             | "presence.update"
+            | "audio.level"
             | "content.index"
-            | "content.index_snapshot" => Self::Snapshot,
+            | "content.index_snapshot"
+            | "media.video_stream.v1" => Self::Snapshot,
             _ => Self::Command,
         }
     }
@@ -79,6 +85,22 @@ mod tests {
     #[test]
     fn sensor_samples_stream() {
         assert_eq!(Qos::of_kind("sensor.sample"), Qos::Stream);
+    }
+
+    #[test]
+    fn gamepad_state_is_latency_first() {
+        assert_eq!(Qos::of_kind("input.gamepad_state"), Qos::Stream);
+    }
+
+    #[test]
+    fn rlcd_decisions_are_a_live_event_stream() {
+        assert_eq!(Qos::of_kind("rlcd.decision.v1"), Qos::Stream);
+    }
+
+    #[test]
+    fn audio_level_is_replaceable_latest_value() {
+        assert_eq!(Qos::of_kind("audio_level"), Qos::Snapshot);
+        assert_eq!(Qos::of_kind("audio.level"), Qos::Snapshot);
     }
 
     #[test]

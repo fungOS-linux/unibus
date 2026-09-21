@@ -11,6 +11,7 @@
 //! v2 generalizes capability/message namespacing without breaking v1 frames.
 
 pub mod auth;
+pub mod client;
 pub mod envelope;
 pub mod framing;
 pub mod grants;

@@ -8,3 +8,4 @@ description = "Wire contract for the household bus: envelopes, framing, grants, 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+anyhow = { workspace = true }

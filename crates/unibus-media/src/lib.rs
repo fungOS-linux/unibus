@@ -8,9 +8,56 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 pub const CAMERA_STREAM_CONTRACT: &str = "camera.stream.v1";
+pub const VIDEO_STREAM_CONTRACT: &str = "media.video_stream.v1";
 pub const CAMERA_DETECTIONS_CONTRACT: &str = "camera.detections.v1";
 pub const CAMERA_PRESENT_CONTRACT: &str = "camera.present.v1";
+pub const AUDIO_PLAYBACK_CHUNK_CONTRACT: &str = "audio.playback_chunk";
 pub const MEDIA_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PcmFormat {
+    S16Le,
+}
+
+/// Metadata for one bounded PCM payload. Audio bytes ride in the Unibus
+/// binary payload and never in JSON. Sequence and capture time make loss and
+/// end-to-end latency observable without pretending TCP delivery is playback
+/// timing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioPlaybackChunk {
+    pub schema_version: u32,
+    pub stream_id: String,
+    pub sequence: u64,
+    pub captured_at_unix_ms: u64,
+    pub sample_rate_hz: u32,
+    pub channels: u16,
+    pub frames: u32,
+    pub format: PcmFormat,
+}
+
+impl AudioPlaybackChunk {
+    pub fn validate(&self, payload_bytes: usize) -> Result<(), ContractError> {
+        if self.schema_version != MEDIA_SCHEMA_VERSION || !slug(&self.stream_id) {
+            return Err(ContractError("invalid audio stream identity".into()));
+        }
+        if !(8_000..=192_000).contains(&self.sample_rate_hz)
+            || !(1..=8).contains(&self.channels)
+            || self.frames == 0
+            || self.frames > self.sample_rate_hz / 10
+        {
+            return Err(ContractError("invalid PCM geometry".into()));
+        }
+        let expected = self.frames as usize * self.channels as usize * 2;
+        if payload_bytes != expected {
+            return Err(ContractError(format!(
+                "PCM payload is {payload_bytes} bytes; expected {expected}"
+            )));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -18,6 +65,7 @@ pub enum VideoTransport {
     Rtsp,
     Srt,
     UdpMpegTs,
+    TcpMpegTs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +82,26 @@ pub enum VideoCodec {
 pub struct CameraStream {
     pub schema_version: u32,
     pub camera_id: String,
+    pub display_name: String,
+    pub zone: String,
+    pub transport: VideoTransport,
+    pub endpoint: String,
+    pub codec: VideoCodec,
+    pub width: u32,
+    pub height: u32,
+    pub frame_rate_millihz: u32,
+    pub announced_at_unix_ms: u64,
+    pub valid_until_unix_ms: u64,
+}
+
+/// Transport-neutral moving pictures that are not cameras (games,
+/// visualizers, presentations). Canvas consumes this exactly like a camera
+/// frame source, without inheriting camera-only detection semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VideoStream {
+    pub schema_version: u32,
+    pub stream_id: String,
     pub display_name: String,
     pub zone: String,
     pub transport: VideoTransport,
@@ -125,30 +193,67 @@ fn future(start: u64, end: u64, field: &str) -> Result<(), ContractError> {
 
 impl CameraStream {
     pub fn validate(&self) -> Result<(), ContractError> {
-        if self.schema_version != MEDIA_SCHEMA_VERSION {
-            return Err(ContractError("unsupported camera stream schema".into()));
-        }
-        if !slug(&self.camera_id) || !slug(&self.zone) {
-            return Err(ContractError("camera_id and zone must be slugs".into()));
-        }
-        if self.display_name.trim().is_empty() || self.display_name.len() > 128 {
-            return Err(ContractError("invalid display_name".into()));
-        }
-        if self.endpoint.trim().is_empty() || self.endpoint.len() > 2048 {
-            return Err(ContractError("invalid media endpoint".into()));
-        }
-        if !(16..=7680).contains(&self.width)
-            || !(16..=4320).contains(&self.height)
-            || !(1_000..=120_000).contains(&self.frame_rate_millihz)
-        {
-            return Err(ContractError("invalid video geometry or frame rate".into()));
-        }
-        future(
+        validate_video(
+            self.schema_version,
+            &self.camera_id,
+            &self.display_name,
+            &self.zone,
+            &self.endpoint,
+            self.width,
+            self.height,
+            self.frame_rate_millihz,
             self.announced_at_unix_ms,
             self.valid_until_unix_ms,
-            "valid_until_unix_ms",
         )
     }
+}
+
+impl VideoStream {
+    pub fn validate(&self) -> Result<(), ContractError> {
+        validate_video(
+            self.schema_version,
+            &self.stream_id,
+            &self.display_name,
+            &self.zone,
+            &self.endpoint,
+            self.width,
+            self.height,
+            self.frame_rate_millihz,
+            self.announced_at_unix_ms,
+            self.valid_until_unix_ms,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_video(
+    schema: u32,
+    id: &str,
+    display_name: &str,
+    zone: &str,
+    endpoint: &str,
+    width: u32,
+    height: u32,
+    fps: u32,
+    announced: u64,
+    valid_until: u64,
+) -> Result<(), ContractError> {
+    if schema != MEDIA_SCHEMA_VERSION || !slug(id) || !slug(zone) {
+        return Err(ContractError("invalid video stream identity".into()));
+    }
+    if display_name.trim().is_empty() || display_name.len() > 128 {
+        return Err(ContractError("invalid display_name".into()));
+    }
+    if endpoint.trim().is_empty() || endpoint.len() > 2048 {
+        return Err(ContractError("invalid media endpoint".into()));
+    }
+    if !(16..=7680).contains(&width)
+        || !(16..=4320).contains(&height)
+        || !(1_000..=120_000).contains(&fps)
+    {
+        return Err(ContractError("invalid video geometry or frame rate".into()));
+    }
+    future(announced, valid_until, "valid_until_unix_ms")
 }
 
 impl CameraDetections {
@@ -230,6 +335,25 @@ mod tests {
             announced_at_unix_ms: 100,
             valid_until_unix_ms: 5_100,
         }
+    }
+
+    #[test]
+    fn audio_chunks_are_small_bounded_and_exact() {
+        let chunk = AudioPlaybackChunk {
+            schema_version: MEDIA_SCHEMA_VERSION,
+            stream_id: "home-playback".into(),
+            sequence: 7,
+            captured_at_unix_ms: 100,
+            sample_rate_hz: 48_000,
+            channels: 2,
+            frames: 480,
+            format: PcmFormat::S16Le,
+        };
+        assert!(chunk.validate(1_920).is_ok());
+        assert!(chunk.validate(1_918).is_err());
+        let mut too_long = chunk.clone();
+        too_long.frames = 4_801;
+        assert!(too_long.validate(19_204).is_err());
     }
 
     #[test]
