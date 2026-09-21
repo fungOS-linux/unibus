@@ -51,6 +51,7 @@ impl Qos {
             | "audio.level"
             | "content.index"
             | "content.index_snapshot"
+            | "canvas.workspace_state.v1"
             | "media.video_stream.v1" => Self::Snapshot,
             _ => Self::Command,
         }
@@ -101,6 +102,11 @@ mod tests {
     fn audio_level_is_replaceable_latest_value() {
         assert_eq!(Qos::of_kind("audio_level"), Qos::Snapshot);
         assert_eq!(Qos::of_kind("audio.level"), Qos::Snapshot);
+    }
+
+    #[test]
+    fn canvas_workspace_state_is_replaceable_latest_value() {
+        assert_eq!(Qos::of_kind("canvas.workspace_state.v1"), Qos::Snapshot);
     }
 
     #[test]
