@@ -68,6 +68,17 @@ pub enum VideoTransport {
     TcpMpegTs,
 }
 
+/// Which side opens a connection-oriented media transport. Datagram and RTSP
+/// transports ignore this field; TCP MPEG-TS requires it so an announcement
+/// cannot ambiguously make every consumer try to bind the same port.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportRole {
+    #[default]
+    Listen,
+    Connect,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VideoCodec {
@@ -85,6 +96,8 @@ pub struct CameraStream {
     pub display_name: String,
     pub zone: String,
     pub transport: VideoTransport,
+    #[serde(default)]
+    pub transport_role: TransportRole,
     pub endpoint: String,
     pub codec: VideoCodec,
     pub width: u32,
@@ -105,6 +118,8 @@ pub struct VideoStream {
     pub display_name: String,
     pub zone: String,
     pub transport: VideoTransport,
+    #[serde(default)]
+    pub transport_role: TransportRole,
     pub endpoint: String,
     pub codec: VideoCodec,
     pub width: u32,
@@ -327,6 +342,7 @@ mod tests {
             display_name: "Front Door".into(),
             zone: "door".into(),
             transport: VideoTransport::Rtsp,
+            transport_role: TransportRole::Listen,
             endpoint: "rtsp://nvr.example/door".into(),
             codec: VideoCodec::H264,
             width: 704,
