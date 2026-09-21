@@ -1,0 +1,21 @@
+[package]
+name = "unibus-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Typed, bounded input and game-session contracts carried over Unibus."
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+unibus = { workspace = true }
+unibus-media = { path = "../unibus-media" }
+libloading = { workspace = true }
+sha2 = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.13"
+
+[dev-dependencies]
+tempfile = { workspace = true }

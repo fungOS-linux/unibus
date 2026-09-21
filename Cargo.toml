@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/unibus", "crates/unibus-media", "crates/unibus-router"]
+members = ["crates/unibus", "crates/unibus-input", "crates/unibus-media", "crates/unibus-router"]
 resolver = "2"
 
 [workspace.package]
@@ -20,4 +20,6 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pemfile = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "sync"] }
 tempfile = "3"
+libloading = "0.8"
+sha2 = "0.10"
 unibus = { path = "crates/unibus" }
