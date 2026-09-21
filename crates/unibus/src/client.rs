@@ -24,7 +24,10 @@ pub struct ClientConfig {
     pub installation_id: String,
     pub producer_id: String,
     pub hub_endpoint: String,
-    pub token_file: PathBuf,
+    #[serde(default)]
+    pub token_file: Option<PathBuf>,
+    #[serde(default)]
+    pub token_env: Option<String>,
     pub zones: Vec<String>,
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -46,10 +49,40 @@ fn default_read_timeout_ms() -> u64 {
 
 impl ClientConfig {
     pub fn token(&self) -> Result<String> {
-        Ok(std::fs::read_to_string(&self.token_file)
-            .with_context(|| format!("read hub token {}", self.token_file.display()))?
-            .trim()
-            .to_owned())
+        let token = match (&self.token_file, &self.token_env) {
+            (Some(path), None) => std::fs::read_to_string(path)
+                .with_context(|| format!("read hub token {}", path.display()))?,
+            (None, Some(name)) => {
+                ensure!(valid_env_name(name), "invalid hub token environment name");
+                std::env::var(name).with_context(|| format!("read hub token environment {name}"))?
+            }
+            _ => anyhow::bail!("exactly one hub token source is required"),
+        };
+        let token = token.trim().to_owned();
+        ensure!(!token.is_empty(), "hub token is empty");
+        Ok(token)
+    }
+}
+
+fn valid_env_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b'A'..=b'Z' | b'_'))
+        && bytes.all(|byte| matches!(byte, b'A'..=b'Z' | b'0'..=b'9' | b'_'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_source_is_explicit_and_environment_names_are_bounded() {
+        assert!(valid_env_name("UNIBUS_SURF_TOKEN"));
+        assert!(!valid_env_name("unibus-token"));
+        let missing: ClientConfig = serde_json::from_str(
+            r#"{"installation_id":"home","producer_id":"surf","hub_endpoint":"127.0.0.1:1","zones":["default"]}"#,
+        )
+        .unwrap();
+        assert!(missing.token().unwrap_err().to_string().contains("exactly one"));
     }
 }
 
