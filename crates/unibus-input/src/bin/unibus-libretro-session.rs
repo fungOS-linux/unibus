@@ -75,6 +75,11 @@ struct Config {
     ffmpeg_path: PathBuf,
     /// Encoder destination, commonly a local SSH tunnel endpoint.
     stream_endpoint: String,
+    /// Additional destinations for the same encoded frames, so a second screen
+    /// can render a session without paying for another encoder pass. Each entry
+    /// uses the same URL forms as `stream_endpoint`.
+    #[serde(default)]
+    mirror_endpoints: Vec<String>,
     /// Endpoint advertised to media edges (from their network namespace).
     advertised_endpoint: String,
     /// Media transport used by FFmpeg and advertised to consumers. UDP keeps
@@ -453,6 +458,22 @@ fn validate_config(config: &Config) -> Result<()> {
             || config.advertised_endpoint.starts_with("udp://"),
         "advertised_endpoint must be tcp:// or udp://"
     );
+    for endpoint in &config.mirror_endpoints {
+        ensure!(
+            endpoint.starts_with("tcp://") || endpoint.starts_with("udp://"),
+            "mirror endpoint {endpoint} must be tcp:// or udp://"
+        );
+        // A `|` or `]` would be read as tee slot syntax rather than as part of
+        // the URL, silently retargeting or splitting the output.
+        ensure!(
+            !endpoint.contains(['|', ']', '[']),
+            "mirror endpoint {endpoint} must not contain tee separators"
+        );
+    }
+    ensure!(
+        !config.stream_endpoint.contains(['|', ']', '[']),
+        "stream_endpoint must not contain tee separators"
+    );
     ensure!(config.core_path.is_file(), "core_path is not a file");
     #[cfg(unix)]
     ensure!(
@@ -653,6 +674,56 @@ fn display_dimensions(av: RetroSystemAvInfo) -> Result<(u32, u32)> {
     Ok((width, height))
 }
 
+/// Lets a receiver that attaches mid-stream sync without waiting for the next
+/// keyframe. This is an mpegts muxer private option, so `tee` accepts it inside
+/// a slot.
+const MPEGTS_RESEND_HEADERS: &str = "+resend_headers";
+
+/// Keep latency at gameplay scale. These are AVFormat-level options rather than
+/// mpegts private ones, so they must stay outside the `tee` slots — ffmpeg
+/// rejects the whole output with "Unknown option 'muxdelay'" otherwise.
+const MUX_LATENCY_OPTIONS: [(&str, &str); 2] = [("muxdelay", "0"), ("muxpreload", "0")];
+
+/// FFmpeg output arguments for one or more MPEG-TS destinations.
+///
+/// A single destination muxes directly. Several go through the `tee` muxer,
+/// which fans the *encoded* packets out, so mirroring a session to another
+/// screen costs one encoder pass rather than one per destination. `tee` needs
+/// an explicit `-map` and repeats its private options per slot, because it
+/// configures each sub-muxer independently.
+fn mpegts_output_args(primary: &str, mirrors: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = MUX_LATENCY_OPTIONS
+        .iter()
+        .flat_map(|(key, value)| [format!("-{key}"), (*value).to_owned()])
+        .collect();
+    args.extend(["-flush_packets".into(), "1".into()]);
+    if mirrors.is_empty() {
+        args.extend([
+            "-mpegts_flags".into(),
+            MPEGTS_RESEND_HEADERS.into(),
+            "-f".into(),
+            "mpegts".into(),
+            primary.to_owned(),
+        ]);
+        return args;
+    }
+    let slots = std::iter::once(primary)
+        .chain(mirrors.iter().map(String::as_str))
+        .map(|destination| {
+            format!("[f=mpegts:mpegts_flags={MPEGTS_RESEND_HEADERS}]{destination}")
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    args.extend([
+        "-map".into(),
+        "0:v:0".into(),
+        "-f".into(),
+        "tee".into(),
+        slots,
+    ]);
+    args
+}
+
 fn start_encoder(config: &Config, av: &RetroSystemAvInfo) -> Result<(Child, ChildStdin)> {
     let size = format!("{}x{}", av.geometry.base_width, av.geometry.base_height);
     let (display_width, display_height) = display_dimensions(*av)?;
@@ -736,23 +807,11 @@ fn start_encoder(config: &Config, av: &RetroSystemAvInfo) -> Result<(Child, Chil
         }
     }
     let mut child = command
-        .args([
-            "-g",
-            "30",
-            "-bf",
-            "0",
-            "-mpegts_flags",
-            "+resend_headers",
-            "-muxdelay",
-            "0",
-            "-muxpreload",
-            "0",
-            "-flush_packets",
-            "1",
-            "-f",
-            "mpegts",
+        .args(["-g", "30", "-bf", "0"])
+        .args(mpegts_output_args(
             &config.stream_endpoint,
-        ])
+            &config.mirror_endpoints,
+        ))
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -1103,4 +1162,80 @@ fn digest_file(path: &Path) -> Result<String> {
 }
 fn path_cstring(path: &Path) -> Result<std::ffi::CString> {
     Ok(std::ffi::CString::new(path.as_os_str().as_encoded_bytes())?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_single_destination_muxes_without_tee() {
+        let args = mpegts_output_args("udp://10.0.0.1:5000", &[]);
+        assert_eq!(args.last().unwrap(), "udp://10.0.0.1:5000");
+        assert!(args.iter().any(|arg| arg == "mpegts"));
+        assert!(
+            !args.iter().any(|arg| arg == "tee"),
+            "one destination must not pay for the tee muxer"
+        );
+    }
+
+    /// Mirroring must fan out the encoded packets, not run the encoder again
+    /// per destination, and every slot needs its own muxer options because tee
+    /// configures each sub-muxer independently.
+    #[test]
+    fn mirrors_share_one_encode_through_tee() {
+        let args = mpegts_output_args(
+            "udp://192.168.20.13:55107",
+            &["udp://127.0.0.1:55107".to_owned()],
+        );
+        let slots = args.last().expect("tee slot list");
+        assert!(args.iter().any(|arg| arg == "tee"));
+        assert_eq!(
+            slots.matches("[f=mpegts:").count(),
+            2,
+            "each destination needs its own muxer options"
+        );
+        assert!(slots.contains("]udp://192.168.20.13:55107|[f=mpegts:"));
+        assert!(slots.ends_with("]udp://127.0.0.1:55107"));
+        assert!(slots.contains("mpegts_flags=+resend_headers"));
+    }
+
+    #[test]
+    fn every_destination_keeps_the_low_latency_mux_options() {
+        for mirrors in [vec![], vec!["udp://127.0.0.1:1".to_owned()]] {
+            let joined = mpegts_output_args("udp://127.0.0.1:2", &mirrors).join(" ");
+            for (key, value) in MUX_LATENCY_OPTIONS {
+                assert!(
+                    joined.contains(key) && joined.contains(value),
+                    "{key}={value} missing with {} mirror(s)",
+                    mirrors.len()
+                );
+            }
+            assert!(joined.contains(MPEGTS_RESEND_HEADERS));
+        }
+    }
+
+    /// Verified against ffmpeg: muxdelay and muxpreload are AVFormat-level
+    /// options, so putting them in a tee slot aborts the whole output with
+    /// "Unknown option 'muxdelay'" and nothing reaches either destination.
+    #[test]
+    fn tee_slots_carry_only_muxer_private_options() {
+        let args = mpegts_output_args("udp://127.0.0.1:1", &["udp://127.0.0.1:2".to_owned()]);
+        let slots = args.last().expect("tee slot list");
+        for (key, _) in MUX_LATENCY_OPTIONS {
+            assert!(
+                !slots.contains(key),
+                "{key} belongs outside the tee slots, not inside them"
+            );
+        }
+    }
+
+    /// The tee muxer selects no streams on its own; without this the run dies
+    /// with "Output file does not contain any stream".
+    #[test]
+    fn tee_maps_the_video_stream_explicitly() {
+        let args = mpegts_output_args("udp://127.0.0.1:1", &["udp://127.0.0.1:2".to_owned()]);
+        let map = args.iter().position(|arg| arg == "-map").expect("-map");
+        assert_eq!(args[map + 1], "0:v:0");
+    }
 }
