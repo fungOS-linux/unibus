@@ -15,13 +15,19 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(unix)]
 mod unix {
+    /// How long to wait before the first reconnect attempt after a failure,
+    /// and the ceiling that backoff grows to. Bounded so a bus that comes
+    /// back is picked up promptly rather than after an ever-lengthening wait.
+    const RECONNECT_BACKOFF_MIN: Duration = Duration::from_millis(250);
+    const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(5);
+
     use anyhow::{Context, Result, ensure};
     use serde::Deserialize;
     use std::{
         fs::Permissions,
         os::{unix::fs::PermissionsExt, unix::net::UnixDatagram},
         path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
     use unibus::{
         Message,
@@ -94,6 +100,11 @@ mod unix {
         let bus_config = config.bus;
         let mut client: Option<Client> = None;
         let mut bytes = [0_u8; 8192];
+        // Reconnects are paced by wall clock, never by sleeping, so the
+        // socket keeps draining through an outage of any length.
+        let mut next_connect = Instant::now();
+        let mut backoff = RECONNECT_BACKOFF_MIN;
+        let mut undelivered = 0_u64;
         loop {
             let count = socket.recv(&mut bytes)?;
             let report: LocalReport =
@@ -112,33 +123,62 @@ mod unix {
             };
             state.validate().map_err(anyhow::Error::msg)?;
             let body = serde_json::to_value(&state)?;
-            loop {
-                if client.is_none() {
-                    match Client::connect(bus_config.clone()) {
-                        Ok(value) => client = Some(value),
-                        Err(error) => {
+
+            // Publishing must never stop this loop draining the socket.
+            //
+            // This used to retry one report forever, 500ms at a time, until
+            // the bus came back. While it did, `socket.recv` was not being
+            // called, the sender's datagram buffer filled, and its sends
+            // started failing with `ENOBUFS` -- which killed a speedy agent
+            // outright and left a freedoom bridge 285,000 reconnects and a
+            // 19MB log deep, having delivered nothing for two days.
+            //
+            // A gamepad report is a *lease*: it carries `valid_until_unix_ms`
+            // and expires `lease_ms` (120ms here) after it was sampled. A
+            // report that could not be sent within that window is worthless
+            // even if it eventually goes out, and the next one supersedes it
+            // entirely. So a failed publish drops the report and moves on.
+            if client.is_none() && Instant::now() >= next_connect {
+                match Client::connect(bus_config.clone()) {
+                    Ok(value) => {
+                        if undelivered > 0 {
+                            eprintln!(
+                                "gamepad bus reconnected after {undelivered} undelivered report(s)"
+                            );
+                        }
+                        client = Some(value);
+                        undelivered = 0;
+                        backoff = RECONNECT_BACKOFF_MIN;
+                    }
+                    Err(error) => {
+                        // Backed off in *time* rather than by sleeping: a
+                        // sleep here would stop draining again, which is the
+                        // whole bug.
+                        next_connect = Instant::now() + backoff;
+                        backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
+                        if undelivered.is_power_of_two() {
                             eprintln!("gamepad bus reconnect: {error:#}");
-                            std::thread::sleep(std::time::Duration::from_millis(500));
-                            continue;
                         }
                     }
                 }
+            }
+            if let Some(connected) = client.as_ref() {
                 let result = (|| -> Result<()> {
-                    let connected = client.as_ref().context("missing gamepad bus client")?;
                     let envelope = connected.envelope(
                         None,
                         Message::new(GAMEPAD_STATE_CONTRACT, body.clone()),
                     )?;
                     connected.send(&envelope, &[])
                 })();
-                match result {
-                    Ok(()) => break,
-                    Err(error) => {
-                        eprintln!("gamepad bus disconnected: {error:#}");
-                        client = None;
-                        std::thread::sleep(std::time::Duration::from_millis(250));
-                    }
+                if let Err(error) = result {
+                    eprintln!("gamepad bus disconnected: {error:#}");
+                    client = None;
+                    next_connect = Instant::now() + RECONNECT_BACKOFF_MIN;
+                    backoff = RECONNECT_BACKOFF_MIN;
+                    undelivered += 1;
                 }
+            } else {
+                undelivered += 1;
             }
         }
     }
