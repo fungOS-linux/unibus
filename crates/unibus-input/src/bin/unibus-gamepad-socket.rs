@@ -27,7 +27,7 @@ mod unix {
         fs::Permissions,
         os::{unix::fs::PermissionsExt, unix::net::UnixDatagram},
         path::PathBuf,
-        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
     use unibus::{
         Message,
@@ -98,13 +98,18 @@ mod unix {
         std::fs::set_permissions(&config.socket_path, Permissions::from_mode(0o600))?;
         let _guard = SocketGuard(config.socket_path.clone());
         let bus_config = config.bus;
-        let mut client: Option<Client> = None;
         let mut bytes = [0_u8; 8192];
-        // Reconnects are paced by wall clock, never by sleeping, so the
-        // socket keeps draining through an outage of any length.
-        let mut next_connect = Instant::now();
-        let mut backoff = RECONNECT_BACKOFF_MIN;
         let mut undelivered = 0_u64;
+
+        // Small on purpose. The queue exists to decouple draining from a
+        // blocking publisher, not to buffer history: every entry past the
+        // newest is a lease that has already expired.
+        let (outbound, inbound) = std::sync::mpsc::sync_channel::<GamepadState>(64);
+        let publisher_config = bus_config.clone();
+        std::thread::Builder::new()
+            .name("gamepad-bus-publisher".into())
+            .spawn(move || publish_forever(&publisher_config, &inbound))
+            .context("spawn the gamepad bus publisher")?;
         loop {
             let count = socket.recv(&mut bytes)?;
             let report: LocalReport =
@@ -122,63 +127,62 @@ mod unix {
                 axes: report.axes,
             };
             state.validate().map_err(anyhow::Error::msg)?;
-            let body = serde_json::to_value(&state)?;
+            // Hand off and go straight back to draining. Publishing must
+            // never happen on this thread: `Client::connect` blocks, and with
+            // `read_timeout_ms` at 60s one stalled connect stops `recv` for a
+            // minute. That is what filled the sender's datagram buffer and
+            // made its sends fail with `ENOBUFS` -- which killed a speedy
+            // agent outright and left this bridge 284,976 reconnects deep,
+            // having delivered nothing for two days.
+            //
+            // A gamepad report is a lease: it carries `valid_until_unix_ms`
+            // and expires `lease_ms` after sampling (120ms in the speedy
+            // configs). If the publisher is behind, the queued report is
+            // already worthless and the newest one supersedes it, so a full
+            // queue drops rather than blocks.
+            if outbound.try_send(state).is_err() {
+                undelivered += 1;
+                if undelivered.is_power_of_two() {
+                    eprintln!(
+                        "gamepad bus behind: {undelivered} report(s) dropped rather than \
+                         stop draining the socket"
+                    );
+                }
+            }
+        }
+    }
 
-            // Publishing must never stop this loop draining the socket.
-            //
-            // This used to retry one report forever, 500ms at a time, until
-            // the bus came back. While it did, `socket.recv` was not being
-            // called, the sender's datagram buffer filled, and its sends
-            // started failing with `ENOBUFS` -- which killed a speedy agent
-            // outright and left a freedoom bridge 285,000 reconnects and a
-            // 19MB log deep, having delivered nothing for two days.
-            //
-            // A gamepad report is a *lease*: it carries `valid_until_unix_ms`
-            // and expires `lease_ms` (120ms here) after it was sampled. A
-            // report that could not be sent within that window is worthless
-            // even if it eventually goes out, and the next one supersedes it
-            // entirely. So a failed publish drops the report and moves on.
-            if client.is_none() && Instant::now() >= next_connect {
+    /// Owns the bus connection and may block freely -- it is not on the path
+    /// that drains the socket.
+    fn publish_forever(bus_config: &ClientConfig, inbound: &std::sync::mpsc::Receiver<GamepadState>) {
+        let mut client: Option<Client> = None;
+        let mut backoff = RECONNECT_BACKOFF_MIN;
+        while let Ok(state) = inbound.recv() {
+            let Ok(body) = serde_json::to_value(&state) else {
+                continue;
+            };
+            if client.is_none() {
                 match Client::connect(bus_config.clone()) {
                     Ok(value) => {
-                        if undelivered > 0 {
-                            eprintln!(
-                                "gamepad bus reconnected after {undelivered} undelivered report(s)"
-                            );
-                        }
                         client = Some(value);
-                        undelivered = 0;
                         backoff = RECONNECT_BACKOFF_MIN;
                     }
                     Err(error) => {
-                        // Backed off in *time* rather than by sleeping: a
-                        // sleep here would stop draining again, which is the
-                        // whole bug.
-                        next_connect = Instant::now() + backoff;
+                        eprintln!("gamepad bus reconnect: {error:#}");
+                        std::thread::sleep(backoff);
                         backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
-                        if undelivered.is_power_of_two() {
-                            eprintln!("gamepad bus reconnect: {error:#}");
-                        }
+                        continue;
                     }
                 }
             }
             if let Some(connected) = client.as_ref() {
-                let result = (|| -> Result<()> {
-                    let envelope = connected.envelope(
-                        None,
-                        Message::new(GAMEPAD_STATE_CONTRACT, body.clone()),
-                    )?;
-                    connected.send(&envelope, &[])
-                })();
-                if let Err(error) = result {
+                let sent = connected
+                    .envelope(None, Message::new(GAMEPAD_STATE_CONTRACT, body))
+                    .and_then(|envelope| connected.send(&envelope, &[]));
+                if let Err(error) = sent {
                     eprintln!("gamepad bus disconnected: {error:#}");
                     client = None;
-                    next_connect = Instant::now() + RECONNECT_BACKOFF_MIN;
-                    backoff = RECONNECT_BACKOFF_MIN;
-                    undelivered += 1;
                 }
-            } else {
-                undelivered += 1;
             }
         }
     }
