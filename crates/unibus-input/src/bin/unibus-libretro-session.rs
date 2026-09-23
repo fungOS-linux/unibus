@@ -821,21 +821,39 @@ fn start_encoder(config: &Config, av: &RetroSystemAvInfo) -> Result<(Child, Chil
     Ok((child, stdin))
 }
 
+/// Input is the difference between a session that plays and one that merely
+/// runs, so it is retried indefinitely -- capped so a long bus outage does not
+/// stretch into an arbitrarily long wait once the bus returns.
+const INPUT_RECONNECT_BACKOFF_MIN: Duration = Duration::from_millis(250);
+const INPUT_RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(5);
+
 fn spawn_input(
     config: ClientConfig,
     session_id: String,
     game_name: Option<String>,
     pads: Arc<Mutex<Vec<Pad>>>,
-    mut stream: VideoStream,
+    stream: VideoStream,
 ) {
     thread::Builder::new()
         .name("unibus-game-input".into())
         .spawn(move || {
+            // Reconnect forever. This used to run once: one bus error ended
+            // the thread, and the emulator carried on serving frames with no
+            // way to ever receive input again -- alive, answering, and
+            // unplayable. Restarting the router proved it, killing input for
+            // five games at once and needing every session restarted by hand.
+            let game_name = game_name.unwrap_or_else(|| session_id.clone());
+            let mut backoff = INPUT_RECONNECT_BACKOFF_MIN;
+            loop {
             let result = (|| -> Result<()> {
-                let client = Arc::new(Client::connect(config)?);
+                let client = Arc::new(Client::connect(config.clone())?);
                 let announcer = client.clone();
                 let registry_session = session_id.clone();
-                let registry_game = game_name.unwrap_or_else(|| session_id.clone());
+                let registry_game = game_name.clone();
+                // Re-announced on every reconnect: the previous announcer
+                // thread ends when its client dies, so without this the video
+                // stream silently stops being advertised after the first blip.
+                let mut stream = stream.clone();
                 thread::Builder::new()
                     .name("unibus-game-video-announce".into())
                     .spawn(move || {
@@ -882,6 +900,7 @@ fn spawn_input(
                             thread::sleep(Duration::from_secs(5));
                         }
                     })?;
+                backoff = INPUT_RECONNECT_BACKOFF_MIN;
                 loop {
                     let Some((envelope, payload)) = client.try_read()? else {
                         continue;
@@ -913,7 +932,12 @@ fn spawn_input(
                 }
             })();
             if let Err(error) = result {
-                eprintln!("libretro-session: input stopped: {error:#}");
+                eprintln!(
+                    "libretro-session: input dropped, reconnecting in {backoff:?}: {error:#}"
+                );
+            }
+            thread::sleep(backoff);
+            backoff = (backoff * 2).min(INPUT_RECONNECT_BACKOFF_MAX);
             }
         })
         .expect("spawn input reader");
