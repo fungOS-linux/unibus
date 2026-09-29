@@ -52,6 +52,12 @@ cargo fmt --all
 | `src/auth.rs` | shared-token compatibility plus verifier-backed fpl-auth sessions; credentials terminate at registration |
 | `tests/hub.rs` | End-to-end over loopback: routing, echoes, anchors, plugin gating |
 
+`crates/unibus-mqtt` — a bidirectional MQTT 3.1.1 edge adapter. Local MQTT
+clients publish and subscribe through their local broker; adapters carry exact
+topics and binary payloads over the reliable `mqtt.publish.v1` Unibus contract.
+Broker sessions, retained state, and MQTT acknowledgements remain broker-owned.
+See [`docs/mqtt-bridge-runbook.md`](docs/mqtt-bridge-runbook.md).
+
 Routing is configuration: the hub maps message kinds to capabilities via a
 `routes` table; unknown kinds without a plugin fail loudly. The hub parses
 only `register` — every data body stays opaque.
