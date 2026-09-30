@@ -139,16 +139,18 @@ fn run_input(
             bail!("MIDI input channel closed")
         })?;
 
-    let _connection = midi.connect(
-        &port,
-        "unibus-midi-capture",
-        move |timestamp, bytes, ()| match sender.try_send((timestamp, bytes.to_vec())) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => warn!("MIDI capture queue full; packet dropped"),
-            Err(TrySendError::Disconnected(_)) => {}
-        },
-        (),
-    )?;
+    let _connection = midi
+        .connect(
+            &port,
+            "unibus-midi-capture",
+            move |timestamp, bytes, ()| match sender.try_send((timestamp, bytes.to_vec())) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => warn!("MIDI capture queue full; packet dropped"),
+                Err(TrySendError::Disconnected(_)) => {}
+            },
+            (),
+        )
+        .map_err(|error| anyhow::anyhow!("connect MIDI input: {error}"))?;
     info!(port = %port_name, %producer_id, "MIDI input bridge started");
     writer
         .join()
@@ -160,7 +162,9 @@ fn run_output(bus_config: ClientConfig, port_query: &str) -> Result<()> {
     let midi = MidiOutput::new("unibus-midi-output")?;
     let port = select_output_port(&midi, port_query)?;
     let port_name = midi.port_name(&port)?;
-    let mut connection = midi.connect(&port, "unibus-midi-playback")?;
+    let mut connection = midi
+        .connect(&port, "unibus-midi-playback")
+        .map_err(|error| anyhow::anyhow!("connect MIDI output: {error}"))?;
     info!(port = %port_name, "MIDI output bridge started");
     loop {
         let Some((envelope, payload)) = bus.try_read()? else {
@@ -227,7 +231,7 @@ where
     let mut available = Vec::new();
     for port in ports {
         let port_name = name(&port)?;
-        if port_name.to_lowercase().contains(&query_lower) {
+        if query == "*" || port_name.to_lowercase().contains(&query_lower) {
             matches.push((port_name.clone(), port));
         }
         available.push(port_name);
@@ -279,5 +283,13 @@ mod tests {
         assert!(config.validate().is_err());
         config.bus.capabilities = vec![MIDI_OUTPUT_CAPABILITY.into()];
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn wildcard_requires_exactly_one_port() {
+        let selected = select_unique(vec!["keyboard"], "*", |port| Ok((*port).to_owned()))
+            .expect("single port should match wildcard");
+        assert_eq!(selected, "keyboard");
+        assert!(select_unique(vec!["one", "two"], "*", |port| Ok((*port).to_owned())).is_err());
     }
 }

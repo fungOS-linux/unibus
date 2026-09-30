@@ -22,6 +22,8 @@ unibus-midi --list
 
 Port matching is case-insensitive substring matching and must select exactly
 one port. Use the shortest stable, unambiguous portion of the displayed name.
+The special selector `"*"` selects the device only when exactly one port is
+present, which is useful for a dedicated keyboard host.
 
 ## Hub configuration
 
@@ -36,7 +38,7 @@ Add the producer-addressed route and grants to the existing hub configuration:
     {
       "producer_id": "mac-studio-midi",
       "token_file": "mac-studio-midi.token",
-      "zones": ["studio"],
+      "zones": ["living-room"],
       "capabilities": ["midi.input"],
       "publishes": ["midi.packet.v1"],
       "publish_producers": ["home-pi-midi"]
@@ -44,7 +46,7 @@ Add the producer-addressed route and grants to the existing hub configuration:
     {
       "producer_id": "home-pi-midi",
       "token_file": "home-pi-midi.token",
-      "zones": ["studio"],
+      "zones": ["living-room"],
       "capabilities": ["midi.output"],
       "publishes": []
     }
@@ -63,16 +65,16 @@ edge from becoming a global broadcast or feeding itself.
   "bus": {
     "installation_id": "home",
     "producer_id": "mac-studio-midi",
-    "hub_endpoint": "127.0.0.1:18790",
+    "hub_endpoint": "127.0.0.1:18791",
     "token_env": "UNIBUS_MIDI_TOKEN",
-    "zones": ["studio"],
+    "zones": ["living-room"],
     "capabilities": ["midi.input"],
     "schema_version": 2,
     "read_timeout_ms": 1000
   },
   "device": {
     "direction": "input",
-    "port": "keyboard",
+    "port": "*",
     "destination": "home-pi-midi"
   },
   "queue_capacity": 1024
@@ -86,21 +88,27 @@ edge from becoming a global broadcast or feeding itself.
   "bus": {
     "installation_id": "home",
     "producer_id": "home-pi-midi",
-    "hub_endpoint": "192.168.10.82:18790",
+    "hub_endpoint": "127.0.0.1:18790",
     "token_env": "UNIBUS_MIDI_TOKEN",
-    "zones": ["studio"],
+    "zones": ["living-room"],
     "capabilities": ["midi.output"],
     "schema_version": 2,
     "read_timeout_ms": 1000
   },
-  "device": { "direction": "output", "port": "Scarlett 18i20" }
+  "device": { "direction": "output", "port": "FLUID Synth" }
 }
 ```
 
-The Pi example uses the Mac Studio's current Wi-Fi address. Prefer a stable
-DHCP reservation or mesh DNS name before installing this as a service. The hub
-must listen on the LAN address with `allow_insecure_lan: true`, or expose its
-loopback listener through the installation's existing secure tunnel.
+These examples put the hub and output edge on the Pi. The Mac endpoint is a
+local SSH forward to the Pi's loopback-only hub:
+
+```sh
+ssh -N -L 127.0.0.1:18791:127.0.0.1:18790 ajm@home-pi
+```
+
+Install that tunnel as a supervised service rather than opening the plaintext
+hub listener on Wi-Fi. `FLUID Synth` is the ALSA sequencer port exposed by the
+local piano sampler; use `Scarlett 18i20` instead to drive physical MIDI DIN.
 
 Start the output edge first, then the input edge:
 
