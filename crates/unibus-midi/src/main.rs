@@ -6,7 +6,7 @@ use std::sync::mpsc::{TrySendError, sync_channel};
 use anyhow::{Context, Result, bail, ensure};
 use midir::{Ignore, MidiInput, MidiInputPort, MidiOutput, MidiOutputPort};
 use serde::Deserialize;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use unibus::Message;
 use unibus::client::{Client as UnibusClient, ClientConfig};
 use unibus_midi::{
@@ -131,9 +131,15 @@ fn run_input(
                 packet.validate(&payload)?;
                 let mut envelope = writer_bus.envelope(
                     Some(&destination),
-                    Message::new(MIDI_PACKET_CONTRACT, serde_json::to_value(packet)?),
+                    Message::new(MIDI_PACKET_CONTRACT, serde_json::to_value(&packet)?),
                 )?;
                 envelope.payload_bytes = payload.len();
+                if let Some((channel, note, velocity)) = note_on(&payload) {
+                    debug!(
+                        sequence = packet.sequence,
+                        channel, note, velocity, "MIDI note captured"
+                    );
+                }
                 writer_bus.send(&envelope, &payload)?;
             }
             bail!("MIDI input channel closed")
@@ -196,8 +202,26 @@ fn run_output(bus_config: ClientConfig, port_query: &str) -> Result<()> {
         let packet: MidiPacket =
             serde_json::from_value(serde_json::Value::Object(envelope.message.body))?;
         packet.validate(&payload)?;
+        if let Some((channel, note, velocity)) = note_on(&payload) {
+            debug!(
+                sequence = packet.sequence,
+                channel,
+                note,
+                velocity,
+                transport_ms =
+                    unibus::envelope::now_ms().saturating_sub(envelope.issued_at_unix_ms),
+                "MIDI note delivered"
+            );
+        }
         connection.send(&payload)?;
     }
+}
+
+fn note_on(payload: &[u8]) -> Option<(u8, u8, u8)> {
+    let [status, note, velocity, ..] = payload else {
+        return None;
+    };
+    (*status & 0xf0 == 0x90 && *velocity > 0).then_some((*status & 0x0f, *note, *velocity))
 }
 
 fn list_ports() -> Result<()> {
@@ -291,5 +315,13 @@ mod tests {
             .expect("single port should match wildcard");
         assert_eq!(selected, "keyboard");
         assert!(select_unique(vec!["one", "two"], "*", |port| Ok((*port).to_owned())).is_err());
+    }
+
+    #[test]
+    fn note_on_excludes_note_off_and_zero_velocity() {
+        assert_eq!(note_on(&[0x92, 60, 7]), Some((2, 60, 7)));
+        assert_eq!(note_on(&[0x82, 60, 7]), None);
+        assert_eq!(note_on(&[0x92, 60, 0]), None);
+        assert_eq!(note_on(&[0x90, 60]), None);
     }
 }
