@@ -44,6 +44,7 @@ impl Qos {
             | "audio.playback_chunk"
             | "audio.start_capture"
             | "input.gamepad_state"
+            | "input.desktop_state.v1"
             | "rlcd.decision.v1"
             | "sensor.sample" => Self::Stream,
             "presence.snapshot"
@@ -91,6 +92,11 @@ mod tests {
     #[test]
     fn gamepad_state_is_latency_first() {
         assert_eq!(Qos::of_kind("input.gamepad_state"), Qos::Stream);
+    }
+
+    #[test]
+    fn desktop_input_is_latency_first() {
+        assert_eq!(Qos::of_kind("input.desktop_state.v1"), Qos::Stream);
     }
 
     #[test]

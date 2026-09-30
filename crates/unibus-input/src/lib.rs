@@ -8,10 +8,13 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 pub const GAMEPAD_STATE_CONTRACT: &str = "input.gamepad_state";
+pub const DESKTOP_STATE_CONTRACT: &str = "input.desktop_state.v1";
 pub const GAME_SESSION_CONTRACT: &str = "game.session.v1";
 pub const INPUT_SCHEMA_VERSION: u32 = 1;
 pub const MAX_PLAYER_SLOTS: u8 = 4;
 pub const MAX_GAMEPAD_LEASE_MS: u64 = 250;
+pub const MAX_DESKTOP_LEASE_MS: u64 = 500;
+pub const MAX_DESKTOP_KEYS: usize = 32;
 pub const OBSERVATION_PROTOCOL_VERSION: u32 = 1;
 pub const MAX_OBSERVATION_RANGES: usize = 64;
 pub const MAX_OBSERVATION_PAYLOAD_BYTES: usize = 60 * 1024;
@@ -314,6 +317,42 @@ pub struct GamepadState {
     pub axes: GamepadAxes,
 }
 
+/// Absolute keyboard and pointer state for controlling a remote desktop.
+///
+/// `keys` contains USB HID keyboard usage IDs. Pointer coordinates span the
+/// full target output (`0` is the left/top edge and `u16::MAX` the right/bottom
+/// edge). Scroll is the only relative value and applies once per `sequence`.
+/// A receiver must release all keys and buttons when the lease expires.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesktopInputState {
+    pub schema_version: u32,
+    pub session_id: String,
+    pub controller_id: String,
+    pub target_id: String,
+    pub sequence: u64,
+    pub sampled_at_unix_ms: u64,
+    pub valid_until_unix_ms: u64,
+    #[serde(default)]
+    pub keys: Vec<u16>,
+    pub pointer_x: u16,
+    pub pointer_y: u16,
+    pub pointer_buttons: u8,
+    #[serde(default)]
+    pub scroll_x: i16,
+    #[serde(default)]
+    pub scroll_y: i16,
+}
+
+pub mod pointer_button {
+    pub const LEFT: u8 = 1 << 0;
+    pub const RIGHT: u8 = 1 << 1;
+    pub const MIDDLE: u8 = 1 << 2;
+    pub const BACK: u8 = 1 << 3;
+    pub const FORWARD: u8 = 1 << 4;
+    pub const ALL: u8 = LEFT | RIGHT | MIDDLE | BACK | FORWARD;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GameSessionRole {
@@ -373,6 +412,41 @@ impl GamepadState {
         if lease == 0 || lease > MAX_GAMEPAD_LEASE_MS {
             return Err(ContractError(format!(
                 "gamepad lease must be 1..={MAX_GAMEPAD_LEASE_MS} ms"
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl DesktopInputState {
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if self.schema_version != INPUT_SCHEMA_VERSION
+            || !slug(&self.session_id)
+            || !slug(&self.controller_id)
+            || !slug(&self.target_id)
+        {
+            return Err(ContractError("invalid desktop input identity".into()));
+        }
+        if self.keys.len() > MAX_DESKTOP_KEYS
+            || self.keys.windows(2).any(|pair| pair[0] >= pair[1])
+            || self.keys.contains(&0)
+        {
+            return Err(ContractError(format!(
+                "desktop keys must be unique, sorted, nonzero HID usages (at most {MAX_DESKTOP_KEYS})"
+            )));
+        }
+        if self.pointer_buttons & !pointer_button::ALL != 0 {
+            return Err(ContractError(
+                "desktop report contains unknown pointer buttons".into(),
+            ));
+        }
+        let lease = self
+            .valid_until_unix_ms
+            .checked_sub(self.sampled_at_unix_ms)
+            .ok_or_else(|| ContractError("desktop report expires before it was sampled".into()))?;
+        if lease == 0 || lease > MAX_DESKTOP_LEASE_MS {
+            return Err(ContractError(format!(
+                "desktop input lease must be 1..={MAX_DESKTOP_LEASE_MS} ms"
             )));
         }
         Ok(())
@@ -453,6 +527,48 @@ mod tests {
         assert!(report.validate().is_err());
         report.buttons = 0;
         report.valid_until_unix_ms = report.sampled_at_unix_ms + MAX_GAMEPAD_LEASE_MS + 1;
+        assert!(report.validate().is_err());
+    }
+
+    fn desktop_report() -> DesktopInputState {
+        DesktopInputState {
+            schema_version: INPUT_SCHEMA_VERSION,
+            session_id: "living-room-control".into(),
+            controller_id: "ajm-macbook".into(),
+            target_id: "home-pi-tv".into(),
+            sequence: 7,
+            sampled_at_unix_ms: 1_000,
+            valid_until_unix_ms: 1_250,
+            keys: vec![0x04, 0xE3],
+            pointer_x: 32_767,
+            pointer_y: 12_345,
+            pointer_buttons: pointer_button::LEFT,
+            scroll_x: 0,
+            scroll_y: -1,
+        }
+    }
+
+    #[test]
+    fn desktop_report_round_trips() {
+        let report = desktop_report();
+        report.validate().unwrap();
+        let wire = serde_json::to_string(&report).unwrap();
+        assert_eq!(
+            serde_json::from_str::<DesktopInputState>(&wire).unwrap(),
+            report
+        );
+    }
+
+    #[test]
+    fn desktop_report_rejects_ambiguous_or_unbounded_state() {
+        let mut report = desktop_report();
+        report.keys = vec![0xE3, 0x04];
+        assert!(report.validate().is_err());
+        report.keys = vec![0x04];
+        report.pointer_buttons = 1 << 7;
+        assert!(report.validate().is_err());
+        report.pointer_buttons = 0;
+        report.valid_until_unix_ms = report.sampled_at_unix_ms + MAX_DESKTOP_LEASE_MS + 1;
         assert!(report.validate().is_err());
     }
 
