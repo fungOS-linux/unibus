@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "component": "unibus-router",
+  "destination": "/usr/local/bin/unibus-router",
+  "candidate_check": {
+    "args": ["_self-check"]
+  },
+  "service": {
+    "kind": "systemd_system",
+    "unit": "unibus-router.service"
+  },
+  "health_check": {
+    "program": "/usr/bin/systemctl",
+    "args": ["is-active", "--quiet", "unibus-router.service"]
+  },
+  "health_timeout_seconds": 10
+}

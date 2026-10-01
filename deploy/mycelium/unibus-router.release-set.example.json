@@ -1,0 +1,11 @@
+{
+  "component": "unibus-router",
+  "version": "0.1.0",
+  "channel": "canary",
+  "artifacts": [
+    {
+      "target": "aarch64-unknown-linux-gnu",
+      "binary": "../../target/aarch64-unknown-linux-gnu/release/unibus-router"
+    }
+  ]
+}
