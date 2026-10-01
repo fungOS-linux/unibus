@@ -95,9 +95,17 @@ edge from becoming a global broadcast or feeding itself.
     "schema_version": 2,
     "read_timeout_ms": 1000
   },
-  "device": { "direction": "output", "port": "FLUID Synth" }
+  "device": {
+    "direction": "output",
+    "port": "FLUID Synth",
+    "channel_mode": "preserve"
+  }
 }
 ```
+
+`channel_mode` defaults to `"preserve"`. Set it to `"all"` for a hardware
+destination that must receive every channel-voice message on MIDI channels
+1-16. System messages such as MIDI clock are sent once rather than duplicated.
 
 These examples put the hub and output edge on the Pi. The Mac endpoint is a
 local SSH forward to the Pi's loopback-only hub:

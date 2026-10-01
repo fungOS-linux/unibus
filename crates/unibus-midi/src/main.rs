@@ -28,8 +28,23 @@ struct BridgeConfig {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "direction", deny_unknown_fields)]
 enum DeviceConfig {
-    Input { port: String, destination: String },
-    Output { port: String },
+    Input {
+        port: String,
+        destination: String,
+    },
+    Output {
+        port: String,
+        #[serde(default)]
+        channel_mode: OutputChannelMode,
+    },
+}
+
+#[derive(Debug, Default, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum OutputChannelMode {
+    #[default]
+    Preserve,
+    All,
 }
 
 fn default_queue_capacity() -> usize {
@@ -61,7 +76,7 @@ impl BridgeConfig {
                 );
                 MIDI_INPUT_CAPABILITY
             }
-            DeviceConfig::Output { port } => {
+            DeviceConfig::Output { port, .. } => {
                 ensure!(!port.trim().is_empty(), "MIDI output port is empty");
                 MIDI_OUTPUT_CAPABILITY
             }
@@ -97,7 +112,7 @@ fn run(config: BridgeConfig) -> Result<()> {
         DeviceConfig::Input { port, destination } => {
             run_input(config.bus, &port, destination, config.queue_capacity)
         }
-        DeviceConfig::Output { port } => run_output(config.bus, &port),
+        DeviceConfig::Output { port, channel_mode } => run_output(config.bus, &port, channel_mode),
     }
 }
 
@@ -163,7 +178,11 @@ fn run_input(
         .map_err(|_| anyhow::anyhow!("MIDI writer thread panicked"))?
 }
 
-fn run_output(bus_config: ClientConfig, port_query: &str) -> Result<()> {
+fn run_output(
+    bus_config: ClientConfig,
+    port_query: &str,
+    channel_mode: OutputChannelMode,
+) -> Result<()> {
     let bus = UnibusClient::connect(bus_config)?;
     let midi = MidiOutput::new("unibus-midi-output")?;
     let port = select_output_port(&midi, port_query)?;
@@ -171,7 +190,7 @@ fn run_output(bus_config: ClientConfig, port_query: &str) -> Result<()> {
     let mut connection = midi
         .connect(&port, "unibus-midi-playback")
         .map_err(|error| anyhow::anyhow!("connect MIDI output: {error}"))?;
-    info!(port = %port_name, "MIDI output bridge started");
+    info!(port = %port_name, ?channel_mode, "MIDI output bridge started");
     loop {
         let Some((envelope, payload)) = bus.try_read()? else {
             continue;
@@ -213,8 +232,38 @@ fn run_output(bus_config: ClientConfig, port_query: &str) -> Result<()> {
                 "MIDI note delivered"
             );
         }
-        connection.send(&payload)?;
+        send_midi(&mut connection, &payload, channel_mode)?;
     }
+}
+
+fn send_midi(
+    connection: &mut midir::MidiOutputConnection,
+    payload: &[u8],
+    channel_mode: OutputChannelMode,
+) -> Result<()> {
+    let messages = expanded_messages(payload, channel_mode);
+    ensure!(!messages.is_empty(), "empty MIDI payload");
+    for message in messages {
+        connection.send(&message)?;
+    }
+    Ok(())
+}
+
+fn expanded_messages(payload: &[u8], channel_mode: OutputChannelMode) -> Vec<Vec<u8>> {
+    let Some(status) = payload.first().copied() else {
+        return Vec::new();
+    };
+    if channel_mode != OutputChannelMode::All || !(0x80..=0xef).contains(&status) {
+        return vec![payload.to_vec()];
+    }
+    let message_kind = status & 0xf0;
+    (0..16)
+        .map(|channel| {
+            let mut message = payload.to_vec();
+            message[0] = message_kind | channel;
+            message
+        })
+        .collect()
 }
 
 fn note_on(payload: &[u8]) -> Option<(u8, u8, u8)> {
@@ -323,5 +372,29 @@ mod tests {
         assert_eq!(note_on(&[0x82, 60, 7]), None);
         assert_eq!(note_on(&[0x92, 60, 0]), None);
         assert_eq!(note_on(&[0x90, 60]), None);
+    }
+
+    #[test]
+    fn all_channel_mode_fans_out_channel_voice_messages() {
+        let messages = expanded_messages(&[0x92, 60, 100], OutputChannelMode::All);
+        assert_eq!(messages.len(), 16);
+        assert_eq!(messages[0], [0x90, 60, 100]);
+        assert_eq!(messages[15], [0x9f, 60, 100]);
+
+        let note_off = expanded_messages(&[0x82, 60, 0], OutputChannelMode::All);
+        assert_eq!(note_off.len(), 16);
+        assert_eq!(note_off[15], [0x8f, 60, 0]);
+    }
+
+    #[test]
+    fn preserve_and_system_messages_are_not_duplicated() {
+        assert_eq!(
+            expanded_messages(&[0x95, 64, 80], OutputChannelMode::Preserve),
+            vec![vec![0x95, 64, 80]]
+        );
+        assert_eq!(
+            expanded_messages(&[0xf8], OutputChannelMode::All),
+            vec![vec![0xf8]]
+        );
     }
 }
