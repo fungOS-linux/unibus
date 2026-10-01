@@ -9,8 +9,11 @@ Build the target artifact, then copy and edit the example release-set version:
 ```sh
 cargo zigbuild --release --target aarch64-unknown-linux-gnu \
   -p unibus-router --bin unibus-router
-cp deploy/mycelium/unibus-router.release-set.example.json /tmp/unibus-release.json
-mycelium releases publish-set --manifest /tmp/unibus-release.json \
+cp deploy/mycelium/unibus-router.release-set.example.json \
+  deploy/mycelium/unibus-router.release-set.local.json
+# Edit the local copy's version; keeping it here preserves relative paths.
+mycelium releases publish-set \
+  --manifest deploy/mycelium/unibus-router.release-set.local.json \
   --signing-key /secure/mycelium-release.key --write
 ```
 
