@@ -30,6 +30,8 @@ struct BridgeConfig {
 enum DeviceConfig {
     Input {
         port: String,
+        #[serde(default)]
+        additional_ports: Vec<String>,
         destination: String,
     },
     Output {
@@ -68,8 +70,16 @@ impl BridgeConfig {
             "MIDI bridge requires Unibus schema_version 2"
         );
         let required_capability = match &self.device {
-            DeviceConfig::Input { port, destination } => {
+            DeviceConfig::Input {
+                port,
+                additional_ports,
+                destination,
+            } => {
                 ensure!(!port.trim().is_empty(), "MIDI input port is empty");
+                ensure!(
+                    additional_ports.iter().all(|port| !port.trim().is_empty()),
+                    "additional MIDI input port is empty"
+                );
                 ensure!(
                     valid_identifier(destination),
                     "invalid MIDI destination producer"
@@ -109,8 +119,14 @@ fn main() -> Result<()> {
 
 fn run(config: BridgeConfig) -> Result<()> {
     match config.device {
-        DeviceConfig::Input { port, destination } => {
-            run_input(config.bus, &port, destination, config.queue_capacity)
+        DeviceConfig::Input {
+            port,
+            additional_ports,
+            destination,
+        } => {
+            let mut ports = vec![port];
+            ports.extend(additional_ports);
+            run_input(config.bus, &ports, destination, config.queue_capacity)
         }
         DeviceConfig::Output { port, channel_mode } => run_output(config.bus, &port, channel_mode),
     }
@@ -118,16 +134,12 @@ fn run(config: BridgeConfig) -> Result<()> {
 
 fn run_input(
     bus_config: ClientConfig,
-    port_query: &str,
+    port_queries: &[String],
     destination: String,
     queue_capacity: usize,
 ) -> Result<()> {
     let producer_id = bus_config.producer_id.clone();
     let bus = Arc::new(UnibusClient::connect(bus_config)?);
-    let mut midi = MidiInput::new("unibus-midi-input")?;
-    midi.ignore(Ignore::None);
-    let port = select_input_port(&midi, port_query)?;
-    let port_name = midi.port_name(&port)?;
     let (sender, receiver) = sync_channel::<(u64, Vec<u8>)>(queue_capacity);
     let sequence = Arc::new(AtomicU64::new(0));
 
@@ -160,19 +172,30 @@ fn run_input(
             bail!("MIDI input channel closed")
         })?;
 
-    let _connection = midi
-        .connect(
-            &port,
-            "unibus-midi-capture",
-            move |timestamp, bytes, ()| match sender.try_send((timestamp, bytes.to_vec())) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => warn!("MIDI capture queue full; packet dropped"),
-                Err(TrySendError::Disconnected(_)) => {}
-            },
-            (),
-        )
-        .map_err(|error| anyhow::anyhow!("connect MIDI input: {error}"))?;
-    info!(port = %port_name, %producer_id, "MIDI input bridge started");
+    let mut connections = Vec::with_capacity(port_queries.len());
+    for (index, port_query) in port_queries.iter().enumerate() {
+        let mut midi = MidiInput::new(&format!("unibus-midi-input-{index}"))?;
+        midi.ignore(Ignore::None);
+        let port = select_input_port(&midi, port_query)?;
+        let port_name = midi.port_name(&port)?;
+        let port_sender = sender.clone();
+        let connection = midi
+            .connect(
+                &port,
+                &format!("unibus-midi-capture-{index}"),
+                move |timestamp, bytes, ()| match port_sender.try_send((timestamp, bytes.to_vec()))
+                {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => warn!("MIDI capture queue full; packet dropped"),
+                    Err(TrySendError::Disconnected(_)) => {}
+                },
+                (),
+            )
+            .map_err(|error| anyhow::anyhow!("connect MIDI input {port_name}: {error}"))?;
+        info!(port = %port_name, %producer_id, "MIDI input bridge started");
+        connections.push(connection);
+    }
+    drop(sender);
     writer
         .join()
         .map_err(|_| anyhow::anyhow!("MIDI writer thread panicked"))?
