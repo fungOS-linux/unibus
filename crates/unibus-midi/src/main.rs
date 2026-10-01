@@ -166,6 +166,11 @@ fn run_input(
                         sequence = packet.sequence,
                         channel, note, velocity, "MIDI note captured"
                     );
+                } else if let Some((channel, control, value)) = control_change(&payload) {
+                    debug!(
+                        sequence = packet.sequence,
+                        channel, control, value, "MIDI control captured"
+                    );
                 }
                 writer_bus.send(&envelope, &payload)?;
             }
@@ -294,6 +299,13 @@ fn note_on(payload: &[u8]) -> Option<(u8, u8, u8)> {
         return None;
     };
     (*status & 0xf0 == 0x90 && *velocity > 0).then_some((*status & 0x0f, *note, *velocity))
+}
+
+fn control_change(payload: &[u8]) -> Option<(u8, u8, u8)> {
+    let [status, control, value, ..] = payload else {
+        return None;
+    };
+    (*status & 0xf0 == 0xb0).then_some((*status & 0x0f, *control, *value))
 }
 
 fn list_ports() -> Result<()> {
