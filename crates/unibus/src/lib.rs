@@ -12,6 +12,8 @@
 
 pub mod auth;
 pub mod client;
+pub mod direct;
+pub mod discovery;
 pub mod envelope;
 pub mod framing;
 pub mod grants;
@@ -19,6 +21,10 @@ pub mod kinds;
 pub mod qos;
 
 pub use auth::{AuthError, NodeClaims, OfflineVerifier};
+pub use direct::{DirectSessionClaims, DirectSessionError, DirectSessionVerifier, PeerBinding};
+pub use discovery::{
+    EndpointSource, NetworkEndpoint, NetworkEndpointError, StaticEndpointSource, Transport,
+};
 pub use envelope::{
     DEFAULT_TTL_MS, Envelope, EnvelopeError, MAX_FRAME, MAX_FUTURE_SKEW_MS, Message,
     SCHEMA_VERSION_V1, SCHEMA_VERSION_V2,
