@@ -1,0 +1,52 @@
+{
+  "unibus": {
+    "installation_id": "home",
+    "producer_id": "studio-mcp-provider",
+    "hub_endpoint": "127.0.0.1:18790",
+    "token_file": "/Users/ajmwagar/.config/unibus/studio-mcp-provider.token",
+    "zones": ["default"],
+    "capabilities": ["mcp.provider"],
+    "schema_version": 2,
+    "read_timeout_ms": 500
+  },
+  "lease_ms": 30000,
+  "providers": [
+    {
+      "provider_id": "studio-blender",
+      "node_id": "darwin-averys-mac-studio",
+      "producer_id": "studio-mcp-provider",
+      "endpoint": "http://127.0.0.1:8000/",
+      "mutation_overrides": {}
+    },
+    {
+      "provider_id": "studio-ghidra",
+      "node_id": "darwin-averys-mac-studio",
+      "producer_id": "studio-mcp-provider",
+      "endpoint": "http://127.0.0.1:8081/mcp",
+      "mutation_overrides": {
+        "decompile_function": "read_only",
+        "get_current_program_info": "read_only",
+        "list_functions": "read_only",
+        "list_open_programs": "read_only"
+      }
+    },
+    {
+      "provider_id": "studio-linkedin",
+      "node_id": "darwin-averys-mac-studio",
+      "producer_id": "studio-mcp-provider",
+      "transport": "stdio",
+      "endpoint": "",
+      "command": "/opt/homebrew/anaconda3/bin/uvx",
+      "args": [
+        "mcp-server-linkedin@4.26.1",
+        "--transport",
+        "stdio",
+        "--timeout",
+        "10000",
+        "--tool-timeout",
+        "180"
+      ],
+      "mutation_overrides": {}
+    }
+  ]
+}

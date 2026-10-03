@@ -1,0 +1,16 @@
+{
+  "unibus": {
+    "installation_id": "home",
+    "producer_id": "neo-mcp-bridge",
+    "hub_endpoint": "100.108.9.93:18790",
+    "token_file": "/Users/ajmwagar/.config/unibus/neo-mcp-bridge.token",
+    "zones": ["default"],
+    "capabilities": ["mcp.bridge"],
+    "schema_version": 2,
+    "read_timeout_ms": 500
+  },
+  "bridge": {
+    "listen": "127.0.0.1:18791",
+    "invocation_timeout_ms": 60000
+  }
+}

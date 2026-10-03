@@ -1,0 +1,18 @@
+{
+  "provider_id": "studio-linkedin",
+  "node_id": "darwin-averys-mac-studio",
+  "producer_id": "studio-mcp-provider",
+  "transport": "stdio",
+  "endpoint": "",
+  "command": "/opt/homebrew/anaconda3/bin/uvx",
+  "args": [
+    "mcp-server-linkedin@4.26.1",
+    "--transport",
+    "stdio",
+    "--timeout",
+    "10000",
+    "--tool-timeout",
+    "180"
+  ],
+  "mutation_overrides": {}
+}

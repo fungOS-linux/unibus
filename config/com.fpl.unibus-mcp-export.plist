@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.fpl.unibus-mcp-export</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/ajmwagar/.local/bin/unibus-mcp</string>
+    <string>publish</string>
+    <string>/Users/ajmwagar/.config/unibus/mcp-neo-export.json</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>StandardOutPath</key><string>/Users/ajmwagar/Library/Logs/Unibus/mcp-export.log</string>
+  <key>StandardErrorPath</key><string>/Users/ajmwagar/Library/Logs/Unibus/mcp-export.err</string>
+</dict></plist>

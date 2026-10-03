@@ -1,0 +1,47 @@
+{
+  "unibus": {
+    "installation_id": "home",
+    "producer_id": "neo-mcp-provider",
+    "hub_endpoint": "100.108.9.93:18790",
+    "token_file": "/Users/ajmwagar/.config/unibus/neo-mcp-provider.token",
+    "zones": ["default"],
+    "capabilities": ["mcp.provider"],
+    "schema_version": 2,
+    "read_timeout_ms": 500
+  },
+  "lease_ms": 30000,
+  "providers": [
+    {
+      "provider_id": "neo-dock-workspaces",
+      "node_id": "darwin-averys-macbook-neo",
+      "producer_id": "neo-mcp-provider",
+      "transport": "stdio",
+      "command": "/Users/ajmwagar/.local/bin/fpl-desktop-bridge",
+      "args": [
+        "connect",
+        "--config",
+        "/Users/ajmwagar/Library/Application Support/FPL Desktop Bridge/config.json",
+        "--connector",
+        "dock-workspaces",
+        "--local"
+      ],
+      "origin_chain": ["fpl-desktop-bridge"],
+      "aggregate": false,
+      "reexport_to_unibus": true,
+      "mutation_overrides": {
+        "canvas_workspace_create": "mutating",
+        "canvas_workspace_reset": "mutating",
+        "canvas_workspace_switch": "mutating",
+        "canvas_workspaces_sync": "mutating",
+        "displays_list": "read_only",
+        "presence_route": "mutating",
+        "project_recall": "mutating",
+        "project_resources": "read_only",
+        "projects_list": "read_only",
+        "resource_open": "mutating",
+        "workspace_activate": "mutating",
+        "workspaces_list": "read_only"
+      }
+    }
+  ]
+}
