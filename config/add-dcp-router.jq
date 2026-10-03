@@ -12,25 +12,28 @@ without_dcp |
   {
     "producer_id":"home-dcp-provider",
     "token_file":"tokens/home-dcp-provider.token",
-    "schema_versions":[2],
+    "zones":["default"],
     "capabilities":["dcp.provider"],
     "publishes":["dcp.catalog.v1","dcp.receipt.v1"],
+    "publish_zones":["default"],
     "publish_producers":["jarvis-dcp-client"]
   },
   {
     "producer_id":"radioman-dcp-provider",
     "token_file":"tokens/radioman-dcp-provider.token",
-    "schema_versions":[2],
+    "zones":["default"],
     "capabilities":["dcp.provider"],
     "publishes":["dcp.catalog.v1","dcp.receipt.v1"],
+    "publish_zones":["default"],
     "publish_producers":["jarvis-dcp-client"]
   },
   {
     "producer_id":"jarvis-dcp-client",
     "token_file":"tokens/jarvis-dcp-client.token",
-    "schema_versions":[2],
+    "zones":["default"],
     "capabilities":["dcp.client"],
     "publishes":["dcp.execute.v1"],
+    "publish_zones":["default"],
     "publish_producers":["home-dcp-provider","radioman-dcp-provider"]
   }
 ]

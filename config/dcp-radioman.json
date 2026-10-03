@@ -2,7 +2,7 @@
   "unibus": {
     "installation_id": "home",
     "producer_id": "radioman-dcp-provider",
-    "hub_endpoint": "100.108.9.93:18790",
+    "hub_endpoint": "192.168.10.74:18790",
     "token_file": "/etc/radioman/unibus.token",
     "zones": ["default"],
     "capabilities": ["dcp.provider"],
