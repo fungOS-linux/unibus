@@ -10,12 +10,16 @@ itself guarantees. Lifted from, and wire-compatible with, JARVIS master
 
 | Layer | Owner | Provides |
 |---|---|---|
-| L0 reachability | Tailscale (externally owned) | tailnet identity, IP across machines/OSes |
+| L0 reachability | provider (`PeerDirectory` + `PeerTransport`) | peer candidates and authenticated paths across machines/OSes |
 | L1 transport | `unibus` (this crate) | framing, envelopes, grants, registry semantics, QoS mapping |
 | L2 contracts | domain crates | typed versioned message bodies, validation, reconcile |
 
 No route computation, no gossip, no multi-hop, no store-and-forward
-intelligence. Hub-and-spoke per installation; "mesh" means the tailnet.
+intelligence in Unibus core. Direct peer delivery is preferred when a provider
+can resolve and connect both peers; a hub remains an optional gateway, relay,
+and compatibility path. Static and DNS providers keep Unibus independently
+operable. The optional `unibus-mycelium` adapter consumes Mycelium's public
+local RPC interface; neither core project imports the other.
 **L1 stays dumb:** anything that parses a message body is a contract. A new
 capability or domain must never require an L1 release.
 
@@ -119,7 +123,10 @@ the fpl-auth integration rather than being duplicated in this crate.
 
 ## Invariants
 
-- One authoritative hub per installation; no elected failover in v1.
+- Grants and signed direct-session assertions remain authoritative regardless
+  of which discovery or transport provider supplies the path.
+- A hub is optional. Its absence must not prevent an authorized direct session
+  when a peer directory and transport can connect the participants.
 - Hub listens on tailnet (+ loopback for the brain itself); TCP fallback is
   loopback-only behind SSH tunnels. Plaintext wildcard TCP requires the
   explicit legacy compatibility switch `allow_insecure_lan`.

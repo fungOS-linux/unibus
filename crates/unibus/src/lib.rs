@@ -18,6 +18,7 @@ pub mod envelope;
 pub mod framing;
 pub mod grants;
 pub mod kinds;
+pub mod peer;
 pub mod qos;
 
 pub use auth::{AuthError, NodeClaims, OfflineVerifier};
@@ -32,4 +33,7 @@ pub use envelope::{
 pub use framing::{FrameError, decode_frame, encode_frame, read_frame, write_frame};
 pub use grants::{NodeGrant, Role, is_valid_namespaced_name, is_valid_slug};
 pub use kinds::Control;
+pub use peer::{
+    PeerCandidate, PeerDirectory, PeerError, PeerSession, PeerTransport, StaticPeerDirectory,
+};
 pub use qos::Qos;

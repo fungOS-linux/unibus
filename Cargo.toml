@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/unibus", "crates/unibus-input", "crates/unibus-media", "crates/unibus-midi", "crates/unibus-mqtt", "crates/unibus-router"]
+members = ["crates/unibus", "crates/unibus-input", "crates/unibus-media", "crates/unibus-midi", "crates/unibus-mqtt", "crates/unibus-mycelium", "crates/unibus-router"]
 resolver = "2"
 
 [workspace.package]

@@ -1,7 +1,9 @@
 # Direct sessions and router discovery
 
-The Unibus router remains the authorization and rendezvous control plane. It
-does not need to remain on the data path for an authorized peer session.
+The Unibus router may provide authorization and rendezvous, but it is an
+optional role rather than the center of the data plane. Signed installation
+policy or another trusted issuer can authorize the same direct-session
+contract.
 
 1. Both peers register with a trusted router.
 2. The initiator requests a direct session for exact message kinds.
@@ -11,6 +13,19 @@ does not need to remain on the data path for an authorized peer session.
 4. Each peer validates the signature through its configured trust provider,
    validates the claims locally, and attempts candidates in policy order.
 5. If direct QUIC cannot connect, the ordinary routed path remains available.
+
+Unibus core exposes two independent boundaries:
+
+- `PeerDirectory` resolves an already-authorized peer identity into fresh
+  `PeerCandidate` endpoints.
+- `PeerTransport` opens a message-oriented session using a signed session
+  assertion.
+
+`StaticPeerDirectory` provides the standalone baseline. DNS implementations
+can project SRV/A/AAAA answers into the same candidates. The optional
+`unibus-mycelium` crate queries Mycelium's newline-delimited local JSON-RPC
+socket and performs the same projection without linking Mycelium libraries or
+introducing any Unibus dependency into Mycelium.
 
 Discovery proves reachability, never authority. Candidates from a local probe,
 DNS, static configuration, or Mycelium all enter through `EndpointSource` as

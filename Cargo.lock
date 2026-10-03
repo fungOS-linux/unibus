@@ -1354,6 +1354,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "unibus-mycelium"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "unibus",
+]
+
+[[package]]
 name = "unibus-router"
 version = "0.1.0"
 dependencies = [
