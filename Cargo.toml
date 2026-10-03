@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/unibus", "crates/unibus-input", "crates/unibus-media", "crates/unibus-midi", "crates/unibus-mqtt", "crates/unibus-mycelium", "crates/unibus-quic", "crates/unibus-router"]
+members = ["crates/unibus", "crates/unibus-dcp", "crates/unibus-input", "crates/unibus-media", "crates/unibus-midi", "crates/unibus-mqtt", "crates/unibus-mycelium", "crates/unibus-quic", "crates/unibus-router", "crates/stream-descriptors"]
 resolver = "2"
 
 [workspace.package]
@@ -24,5 +24,7 @@ libloading = "0.8"
 midir = "0.11"
 sha2 = "0.10"
 rumqttc = "0.25"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
+dcp = { git = "https://github.com/FuturePresentLabs/dcp.git", rev = "d3a1335" }
 unibus = { path = "crates/unibus" }
 unibus-quic = { path = "crates/unibus-quic" }

@@ -1,0 +1,14 @@
+[package]
+name = "unibus-dcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Decision Catalog Protocol discovery and execution binding for Unibus"
+
+[dependencies]
+anyhow.workspace = true
+dcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+unibus.workspace = true

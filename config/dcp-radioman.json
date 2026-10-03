@@ -1,0 +1,23 @@
+{
+  "unibus": {
+    "installation_id": "home",
+    "producer_id": "radioman-dcp-provider",
+    "hub_endpoint": "100.108.9.93:18790",
+    "token_file": "/home/ajmwagar/.config/unibus/radioman-dcp-provider.token",
+    "zones": ["default"],
+    "capabilities": ["dcp.provider"],
+    "schema_version": 2,
+    "read_timeout_ms": 500
+  },
+  "lease_ms": 30000,
+  "providers": [
+    {
+      "provider_id": "radioman",
+      "node_id": "radioman-pi",
+      "producer_id": "radioman-dcp-provider",
+      "endpoint": "http://127.0.0.1:7894",
+      "bearer_token_file": "/home/ajmwagar/.config/radioman/dcp.token",
+      "user_email": "avery@fpl.dev"
+    }
+  ]
+}
