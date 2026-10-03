@@ -1,0 +1,20 @@
+[Unit]
+Description=Lease Radioman DCP decisions onto UniBus
+After=network-online.target radioman-dcp.service
+Requires=radioman-dcp.service
+
+[Service]
+Type=simple
+User=radioman
+Group=radioman
+ExecStart=/usr/local/bin/unibus-dcp publish /etc/radioman/dcp-unibus.json
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
