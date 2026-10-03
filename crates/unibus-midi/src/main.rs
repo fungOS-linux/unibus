@@ -1,14 +1,15 @@
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{TrySendError, sync_channel};
+use std::sync::mpsc::{RecvTimeoutError, TrySendError, sync_channel};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use midir::{Ignore, MidiInput, MidiInputPort, MidiOutput, MidiOutputPort};
 use serde::Deserialize;
 use tracing::{debug, info, warn};
-use unibus::Message;
 use unibus::client::{Client as UnibusClient, ClientConfig};
+use unibus::{Message, ReconnectBackoff, ReconnectPolicy};
 use unibus_midi::{
     MIDI_INPUT_CAPABILITY, MIDI_OUTPUT_CAPABILITY, MIDI_PACKET_CONTRACT, MIDI_SCHEMA_VERSION,
     MidiPacket, valid_identifier,
@@ -16,7 +17,7 @@ use unibus_midi::{
 
 const DEFAULT_QUEUE_CAPACITY: usize = 1024;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BridgeConfig {
     bus: ClientConfig,
@@ -25,7 +26,7 @@ struct BridgeConfig {
     queue_capacity: usize,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "direction", deny_unknown_fields)]
 enum DeviceConfig {
     Input {
@@ -114,7 +115,27 @@ fn main() -> Result<()> {
     if argument == "--list" {
         return list_ports();
     }
-    run(BridgeConfig::read(Path::new(&argument))?)
+    supervise(BridgeConfig::read(Path::new(&argument))?)
+}
+
+fn supervise(config: BridgeConfig) -> Result<()> {
+    let mut backoff =
+        ReconnectBackoff::new(ReconnectPolicy::default()).map_err(anyhow::Error::msg)?;
+    loop {
+        let started = Instant::now();
+        let error = match run(config.clone()) {
+            Ok(()) => anyhow::anyhow!("MIDI bridge session stopped unexpectedly"),
+            Err(error) => error,
+        };
+        let delay = backoff.failed_after(started.elapsed());
+        warn!(
+            error = %error,
+            retry_ms = delay.as_millis(),
+            failures = backoff.consecutive_failures(),
+            "MIDI bridge session failed; reconnecting"
+        );
+        std::thread::sleep(delay);
+    }
 }
 
 fn run(config: BridgeConfig) -> Result<()> {
@@ -148,7 +169,15 @@ fn run_input(
     let writer = std::thread::Builder::new()
         .name("unibus-midi-writer".into())
         .spawn(move || -> Result<()> {
-            while let Ok((timestamp, payload)) = receiver.recv() {
+            loop {
+                let (timestamp, payload) = match receiver.recv_timeout(Duration::from_secs(1)) {
+                    Ok(packet) => packet,
+                    Err(RecvTimeoutError::Timeout) => {
+                        ensure!(writer_bus.is_healthy(), "Unibus heartbeat stopped");
+                        continue;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => bail!("MIDI input channel closed"),
+                };
                 let packet = MidiPacket {
                     schema_version: MIDI_SCHEMA_VERSION,
                     origin: writer_origin.clone(),
@@ -174,7 +203,6 @@ fn run_input(
                 }
                 writer_bus.send(&envelope, &payload)?;
             }
-            bail!("MIDI input channel closed")
         })?;
 
     let mut connections = Vec::with_capacity(port_queries.len());

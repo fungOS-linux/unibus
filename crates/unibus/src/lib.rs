@@ -20,6 +20,7 @@ pub mod grants;
 pub mod kinds;
 pub mod peer;
 pub mod qos;
+pub mod reconnect;
 
 pub use auth::{AuthError, NodeClaims, OfflineVerifier};
 pub use direct::{DirectSessionClaims, DirectSessionError, DirectSessionVerifier, PeerBinding};
@@ -38,3 +39,4 @@ pub use peer::{
     StaticPeerDirectory, connect_direct_or_else,
 };
 pub use qos::Qos;
+pub use reconnect::{ReconnectBackoff, ReconnectPolicy};

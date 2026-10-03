@@ -214,6 +214,12 @@ impl Client {
         Ok(())
     }
 
+    /// False after the heartbeat writer observes a broken transport. Edge
+    /// processes should rebuild and re-register the whole client session.
+    pub fn is_healthy(&self) -> bool {
+        !self.stop.load(Ordering::Acquire)
+    }
+
     pub fn try_read(&self) -> Result<Option<(Envelope, Vec<u8>)>> {
         ensure!(
             !self.stop.load(Ordering::Acquire),

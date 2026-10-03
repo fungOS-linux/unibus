@@ -12,6 +12,17 @@ ALSA: a bounded local queue hands packets to the bus writer. A full queue is a
 loud error in the log and drops the new packet. The receiver sends packets
 immediately; source timestamps are retained for diagnostics, not scheduling.
 
+The bridge supervises its whole runtime session. Loss of the hub, secure
+tunnel, or local MIDI port closes the failed session, then reconnects and
+registers again with bounded exponential backoff (250 ms through 30 s). A
+session healthy for 30 seconds resets the backoff. Configuration errors still
+fail before supervision begins.
+
+MIDI packets are intentionally not persisted or replayed after an outage.
+Replaying stale note, sustain, or clock events is less correct than a visible
+drop. Unibus durability here means stable configuration and identity plus
+automatic recovery, not a disk-backed queue.
+
 ## Discover device names
 
 Run on each host:
@@ -124,6 +135,21 @@ Start the output edge first, then the input edge:
 unibus-midi /etc/unibus/midi-output.json
 unibus-midi /etc/unibus/midi-input.json
 ```
+
+On Linux, install `deploy/systemd/unibus-midi@.service`, then enable named
+instances whose configuration is `/etc/unibus/midi-<name>.json`:
+
+```sh
+sudo systemctl enable --now unibus-midi@output.service
+systemctl status unibus-midi@output.service
+journalctl -u unibus-midi@output.service -f
+```
+
+The internal reconnect loop handles ordinary network and device interruption;
+systemd handles process crashes and reboot startup. On macOS, install the same
+command as a `launchd` agent with `RunAtLoad` and `KeepAlive` enabled. Keep the
+bridge configuration and token file at stable paths rather than embedding
+secrets in the service definition.
 
 Verify note-on, note-off, sustain pedal, pitch bend, MIDI clock, and SysEx if
 the keyboard emits it. Stop the Pi edge and confirm the hub reports delivery

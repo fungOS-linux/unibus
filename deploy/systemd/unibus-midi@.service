@@ -1,0 +1,19 @@
+[Unit]
+Description=FPL Unibus MIDI bridge (%i)
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/unibus-midi /etc/unibus/midi-%i.json
+# The bridge reconnects transport and MIDI sessions internally. The service
+# manager remains the process-level safety net for panics and binary failures.
+Restart=always
+RestartSec=2s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target
