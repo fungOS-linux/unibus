@@ -18,6 +18,10 @@ registers again with bounded exponential backoff (250 ms through 30 s). A
 session healthy for 30 seconds resets the backoff. Configuration errors still
 fail before supervision begins.
 
+An output edge sends sustain-off, all-sound-off, and all-notes-off on every
+channel when it opens and when it detects bus loss. This prevents an interrupted
+session from leaving the local synth with stuck notes while transport recovers.
+
 MIDI packets are intentionally not persisted or replayed after an outage.
 Replaying stale note, sustain, or clock events is less correct than a visible
 drop. Unibus durability here means stable configuration and identity plus

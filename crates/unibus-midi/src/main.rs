@@ -246,9 +246,19 @@ fn run_output(
     let mut connection = midi
         .connect(&port, "unibus-midi-playback")
         .map_err(|error| anyhow::anyhow!("connect MIDI output: {error}"))?;
+    reset_midi_output(&mut connection)?;
     info!(port = %port_name, ?channel_mode, "MIDI output bridge started");
     loop {
-        let Some((envelope, payload)) = bus.try_read()? else {
+        let frame = match bus.try_read() {
+            Ok(frame) => frame,
+            Err(error) => {
+                if let Err(reset_error) = reset_midi_output(&mut connection) {
+                    warn!(error = %reset_error, "failed to reset MIDI output after bus loss");
+                }
+                return Err(error);
+            }
+        };
+        let Some((envelope, payload)) = frame else {
             continue;
         };
         if matches!(
@@ -290,6 +300,23 @@ fn run_output(
         }
         send_midi(&mut connection, &payload, channel_mode)?;
     }
+}
+
+fn reset_midi_output(connection: &mut midir::MidiOutputConnection) -> Result<()> {
+    for message in reset_messages() {
+        connection.send(&message)?;
+    }
+    Ok(())
+}
+
+fn reset_messages() -> impl Iterator<Item = [u8; 3]> {
+    (0_u8..16).flat_map(|channel| {
+        [
+            [0xb0 | channel, 64, 0],  // sustain off
+            [0xb0 | channel, 120, 0], // all sound off
+            [0xb0 | channel, 123, 0], // all notes off
+        ]
+    })
 }
 
 fn send_midi(
@@ -459,5 +486,15 @@ mod tests {
             expanded_messages(&[0xf8], OutputChannelMode::All),
             vec![vec![0xf8]]
         );
+    }
+
+    #[test]
+    fn reconnect_reset_clears_sustain_sound_and_notes_on_every_channel() {
+        let messages = reset_messages().collect::<Vec<_>>();
+        assert_eq!(messages.len(), 48);
+        assert_eq!(messages[0], [0xb0, 64, 0]);
+        assert_eq!(messages[2], [0xb0, 123, 0]);
+        assert_eq!(messages[45], [0xbf, 64, 0]);
+        assert_eq!(messages[47], [0xbf, 123, 0]);
     }
 }
