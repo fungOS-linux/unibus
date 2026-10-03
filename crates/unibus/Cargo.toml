@@ -9,3 +9,6 @@ description = "Wire contract for the household bus: envelopes, framing, grants, 
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+
+[dev-dependencies]
+tokio.workspace = true

@@ -1,6 +1,7 @@
 # QUIC transport runbook
 
-The library hub exposes `Hub::start_quic(address, server_config)` alongside the
+The shared `unibus-quic` crate owns QUIC framing and TLS primitives. The
+library hub exposes `Hub::start_quic(address, server_config)` alongside the
 v1-compatible TCP listener. The `unibus-hub` CLI starts QUIC automatically when
 its configuration contains a `quic` object. QUIC is TLS 1.3-capable through Quinn/Rustls and
 uses the same envelope codec, registration assertions, grants, routing, and
@@ -64,3 +65,9 @@ Rollback is transport selection, not a protocol conversion: stop accepting the
 QUIC UDP listener and reconnect through loopback TCP behind an SSH/Tailscale
 tunnel. Do not enable `allow_insecure_lan` as an automatic fallback. The golden
 v1 TCP vectors and the QUIC tests exercise the same frame codec.
+
+For hub-free peer sessions, use `DirectQuicListener` and
+`DirectQuicTransport` with mutual TLS plus verified `DirectSessionClaims`.
+Certificate fingerprints must match the claims' peer key bindings. See
+`direct-sessions-and-discovery.md`; ordinary router QUIC and direct QUIC share
+the same codec rather than maintaining separate implementations.

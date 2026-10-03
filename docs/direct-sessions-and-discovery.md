@@ -27,6 +27,40 @@ can project SRV/A/AAAA answers into the same candidates. The optional
 socket and performs the same projection without linking Mycelium libraries or
 introducing any Unibus dependency into Mycelium.
 
+## Direct QUIC transport
+
+`unibus-quic` owns the QUIC framing and TLS implementation shared by the hub
+and direct peers. `DirectQuicTransport` implements the client side of
+`PeerTransport`; `DirectQuicListener` accepts direct sessions without starting
+a hub.
+
+Direct sessions require mutual TLS. Each side hashes the other peer's leaf
+certificate and requires the resulting `sha256:<hex>` value to equal that
+peer's `key_binding` in the verified `DirectSessionClaims`. The first frame is
+an authentication frame carrying the signed assertion. Subsequent frames must:
+
+- come from the producer bound to that side of the connection;
+- use the authorized installation and exact allowed message kind;
+- stay within the session payload bound;
+- carry no registration bearer token; and
+- remain within the ordinary Unibus envelope TTL.
+
+The standalone flow is:
+
+```text
+Static/DNS PeerDirectory -> DirectQuicTransport -> peer
+```
+
+The Mycelium-assisted flow changes only discovery:
+
+```text
+MyceliumDirectory -> DirectQuicTransport -> peer
+```
+
+`connect_direct_or_else` exposes routed fallback as an explicit callback and
+returns whether the selected path was `Direct` or `Fallback`. A failed direct
+connection never silently weakens authentication or chooses a router.
+
 Discovery proves reachability, never authority. Candidates from a local probe,
 DNS, static configuration, or Mycelium all enter through `EndpointSource` as
 validated `NetworkEndpoint` facts and

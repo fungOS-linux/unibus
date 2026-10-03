@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/unibus", "crates/unibus-input", "crates/unibus-media", "crates/unibus-midi", "crates/unibus-mqtt", "crates/unibus-mycelium", "crates/unibus-router"]
+members = ["crates/unibus", "crates/unibus-input", "crates/unibus-media", "crates/unibus-midi", "crates/unibus-mqtt", "crates/unibus-mycelium", "crates/unibus-quic", "crates/unibus-router"]
 resolver = "2"
 
 [workspace.package]
@@ -25,3 +25,4 @@ midir = "0.11"
 sha2 = "0.10"
 rumqttc = "0.25"
 unibus = { path = "crates/unibus" }
+unibus-quic = { path = "crates/unibus-quic" }

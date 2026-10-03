@@ -7,6 +7,8 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 
@@ -66,16 +68,50 @@ pub trait PeerDirectory: Send + Sync {
 /// contracts.
 pub trait PeerSession: Send {
     fn peer_id(&self) -> &str;
-    fn send(&mut self, envelope: &Envelope, payload: &[u8]) -> Result<(), PeerError>;
-    fn receive(&mut self) -> Result<(Envelope, Vec<u8>), PeerError>;
+    fn send<'a>(&'a mut self, envelope: &'a Envelope, payload: &'a [u8]) -> PeerFuture<'a, ()>;
+    fn receive(&mut self) -> PeerFuture<'_, (Envelope, Vec<u8>)>;
 }
 
 pub trait PeerTransport: Send + Sync {
-    fn connect(
-        &self,
-        candidate: &PeerCandidate,
-        session_assertion: &str,
-    ) -> Result<Box<dyn PeerSession>, PeerError>;
+    fn connect<'a>(
+        &'a self,
+        candidate: &'a PeerCandidate,
+        session_assertion: &'a str,
+    ) -> PeerFuture<'a, Box<dyn PeerSession>>;
+}
+
+pub type PeerFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, PeerError>> + Send + 'a>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionPath {
+    Direct,
+    Fallback,
+}
+
+/// Prefer a direct transport while making the downgrade decision explicit at
+/// the call site. The fallback receives the direct failure for logging and
+/// policy decisions; there is no silent security or transport downgrade.
+pub async fn connect_direct_or_else<F, Fut>(
+    direct: &dyn PeerTransport,
+    candidate: &PeerCandidate,
+    session_assertion: &str,
+    fallback: F,
+) -> Result<(SessionPath, Box<dyn PeerSession>), PeerError>
+where
+    F: FnOnce(&PeerError) -> Fut,
+    Fut: Future<Output = Result<Box<dyn PeerSession>, PeerError>>,
+{
+    match direct.connect(candidate, session_assertion).await {
+        Ok(session) => Ok((SessionPath::Direct, session)),
+        Err(direct_error) => fallback(&direct_error)
+            .await
+            .map(|session| (SessionPath::Fallback, session))
+            .map_err(|fallback_error| {
+                PeerError(format!(
+                    "direct connection failed: {direct_error}; fallback failed: {fallback_error}"
+                ))
+            }),
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -136,5 +172,63 @@ mod tests {
         );
         assert!(directory.resolve("unknown", 100).is_err());
         assert!(directory.resolve("home-pi", 200).is_err());
+    }
+
+    struct FailingTransport;
+
+    impl PeerTransport for FailingTransport {
+        fn connect<'a>(
+            &'a self,
+            _candidate: &'a PeerCandidate,
+            _session_assertion: &'a str,
+        ) -> PeerFuture<'a, Box<dyn PeerSession>> {
+            Box::pin(async { Err(PeerError("direct unavailable".into())) })
+        }
+    }
+
+    struct StubSession;
+
+    impl PeerSession for StubSession {
+        fn peer_id(&self) -> &str {
+            "home-pi"
+        }
+
+        fn send<'a>(
+            &'a mut self,
+            _envelope: &'a Envelope,
+            _payload: &'a [u8],
+        ) -> PeerFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn receive(&mut self) -> PeerFuture<'_, (Envelope, Vec<u8>)> {
+            Box::pin(async { Err(PeerError("stub has no frames".into())) })
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_is_explicit_and_receives_direct_failure() {
+        let candidate = PeerCandidate {
+            peer_id: "home-pi".into(),
+            site: None,
+            endpoints: vec![NetworkEndpoint {
+                transport: Transport::Quic,
+                host: "home-pi.mesh.fpl.dev".into(),
+                port: 18792,
+                server_name: None,
+                priority: 0,
+                weight: 0,
+            }],
+            expires_at_unix_s: 200,
+        };
+        let (path, session) =
+            connect_direct_or_else(&FailingTransport, &candidate, "assertion", |direct_error| {
+                assert_eq!(direct_error.0, "direct unavailable");
+                std::future::ready(Ok(Box::new(StubSession) as Box<dyn PeerSession>))
+            })
+            .await
+            .unwrap();
+        assert_eq!(path, SessionPath::Fallback);
+        assert_eq!(session.peer_id(), "home-pi");
     }
 }

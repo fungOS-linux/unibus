@@ -34,6 +34,7 @@ pub use framing::{FrameError, decode_frame, encode_frame, read_frame, write_fram
 pub use grants::{NodeGrant, Role, is_valid_namespaced_name, is_valid_slug};
 pub use kinds::Control;
 pub use peer::{
-    PeerCandidate, PeerDirectory, PeerError, PeerSession, PeerTransport, StaticPeerDirectory,
+    PeerCandidate, PeerDirectory, PeerError, PeerFuture, PeerSession, PeerTransport, SessionPath,
+    StaticPeerDirectory, connect_direct_or_else,
 };
 pub use qos::Qos;

@@ -18,6 +18,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 unibus = { workspace = true }
+unibus-quic = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
