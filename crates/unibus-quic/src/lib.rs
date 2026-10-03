@@ -12,6 +12,104 @@ use unibus::{Envelope, MAX_FRAME, Qos, decode_frame, encode_frame};
 
 pub mod direct;
 
+/// TLS material supplied by a deployment-owned identity provider.
+///
+/// Unibus consumes this material but does not issue, renew, or revoke it. A
+/// provider may be ordinary files, Mycelium, or another PKI implementation.
+pub struct PeerCredentialMaterial {
+    pub certificates: Vec<CertificateDer<'static>>,
+    pub private_key: PrivateKeyDer<'static>,
+    pub trust_roots: RootCertStore,
+}
+
+/// Narrow identity boundary for direct Unibus mTLS sessions.
+///
+/// Implementations should return fresh material on every call so certificate
+/// rotation is observed when a listener or client endpoint is rebuilt.
+pub trait PeerCredentials: Send + Sync {
+    fn load(&self) -> Result<PeerCredentialMaterial>;
+}
+
+#[derive(Debug, Clone)]
+pub struct PemPeerCredentials {
+    ca_file: std::path::PathBuf,
+    cert_file: std::path::PathBuf,
+    key_file: std::path::PathBuf,
+}
+
+impl PemPeerCredentials {
+    pub fn new(
+        ca_file: impl Into<std::path::PathBuf>,
+        cert_file: impl Into<std::path::PathBuf>,
+        key_file: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        Self {
+            ca_file: ca_file.into(),
+            cert_file: cert_file.into(),
+            key_file: key_file.into(),
+        }
+    }
+}
+
+impl PeerCredentials for PemPeerCredentials {
+    fn load(&self) -> Result<PeerCredentialMaterial> {
+        load_peer_credentials(&self.ca_file, &self.cert_file, &self.key_file)
+    }
+}
+
+pub fn load_peer_credentials(
+    ca_file: &Path,
+    cert_file: &Path,
+    key_file: &Path,
+) -> Result<PeerCredentialMaterial> {
+    let certificates = read_certificates(cert_file, "peer certificate")?;
+    let mut trust_roots = RootCertStore::empty();
+    for certificate in read_certificates(ca_file, "peer CA")? {
+        trust_roots
+            .add(certificate)
+            .context("add peer CA certificate to trust store")?;
+    }
+    let key_bytes = std::fs::read(key_file)
+        .with_context(|| format!("read peer private key {}", key_file.display()))?;
+    let private_key = rustls_pemfile::private_key(&mut key_bytes.as_slice())
+        .with_context(|| format!("parse peer private key {}", key_file.display()))?
+        .context("peer private key file contains no key")?;
+    Ok(PeerCredentialMaterial {
+        certificates,
+        private_key,
+        trust_roots,
+    })
+}
+
+fn read_certificates(path: &Path, label: &str) -> Result<Vec<CertificateDer<'static>>> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {label} {}", path.display()))?;
+    let certificates = rustls_pemfile::certs(&mut bytes.as_slice())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| format!("parse {label} {}", path.display()))?;
+    if certificates.is_empty() {
+        return Err(anyhow!("{label} file contains no certificates"));
+    }
+    Ok(certificates)
+}
+
+pub fn mutual_server_config_from(credentials: &dyn PeerCredentials) -> Result<quinn::ServerConfig> {
+    let material = credentials.load()?;
+    mutual_server_config(
+        material.certificates,
+        material.private_key,
+        material.trust_roots,
+    )
+}
+
+pub fn mutual_client_config_from(credentials: &dyn PeerCredentials) -> Result<quinn::ClientConfig> {
+    let material = credentials.load()?;
+    mutual_client_config(
+        material.certificates,
+        material.private_key,
+        material.trust_roots,
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuicDelivery {
     Datagram,
@@ -201,4 +299,47 @@ pub fn certificate_key_binding(certificate: &CertificateDer<'_>) -> String {
         write!(output, "{byte:02x}").expect("write to string");
     }
     output
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use std::fs;
+
+    use rcgen::{CertifiedKey, generate_simple_self_signed};
+
+    use super::*;
+
+    #[test]
+    fn pem_provider_loads_fresh_material_for_both_mtls_roles() {
+        let CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(vec!["peer.test".into()]).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let ca = directory.path().join("ca.pem");
+        let certificate = directory.path().join("node.pem");
+        let key = directory.path().join("node-key.pem");
+        fs::write(&ca, cert.pem()).unwrap();
+        fs::write(&certificate, cert.pem()).unwrap();
+        fs::write(&key, signing_key.serialize_pem()).unwrap();
+
+        let provider = PemPeerCredentials::new(&ca, &certificate, &key);
+        let material = provider.load().unwrap();
+        assert_eq!(material.certificates, vec![cert.der().clone()]);
+        assert_eq!(material.trust_roots.len(), 1);
+
+        // Each configuration reloads the files, which is the rotation boundary.
+        mutual_client_config_from(&provider).unwrap();
+        mutual_server_config_from(&provider).unwrap();
+    }
+
+    #[test]
+    fn pem_provider_fails_loudly_when_identity_is_incomplete() {
+        let directory = tempfile::tempdir().unwrap();
+        let provider = PemPeerCredentials::new(
+            directory.path().join("ca.pem"),
+            directory.path().join("node.pem"),
+            directory.path().join("node-key.pem"),
+        );
+        let error = provider.load().err().unwrap().to_string();
+        assert!(error.contains("node.pem"));
+    }
 }

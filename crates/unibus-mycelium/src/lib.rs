@@ -1,4 +1,4 @@
-//! Optional Mycelium-backed peer directory for Unibus.
+//! Optional Mycelium-backed discovery and identity providers for Unibus.
 //!
 //! This adapter speaks Mycelium's public newline-delimited JSON-RPC boundary.
 //! Mycelium does not import Unibus, and Unibus core does not import Mycelium.
@@ -12,6 +12,45 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use unibus::{NetworkEndpoint, PeerCandidate, PeerDirectory, PeerError, Transport};
+use unibus_quic::{PeerCredentialMaterial, PeerCredentials, PemPeerCredentials};
+
+/// Loads the enrolled Mycelium peer identity through Unibus's provider-neutral
+/// credential boundary. Mycelium remains unaware of Unibus traffic and policy.
+#[derive(Debug, Clone)]
+pub struct MyceliumCredentials {
+    inner: PemPeerCredentials,
+}
+
+impl MyceliumCredentials {
+    /// Use the stable layout produced by `mycelium enroll install`.
+    pub fn from_home(home: impl Into<PathBuf>) -> Self {
+        let home = home.into();
+        Self::new(
+            home.join("pki/ca.pem"),
+            home.join("pki/node.pem"),
+            home.join("pki/node-key.pem"),
+        )
+    }
+
+    /// Use explicitly selected Mycelium peer credential files. This also
+    /// supports installations whose service environment overrides the default
+    /// enrollment paths.
+    pub fn new(
+        ca_file: impl Into<PathBuf>,
+        cert_file: impl Into<PathBuf>,
+        key_file: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            inner: PemPeerCredentials::new(ca_file, cert_file, key_file),
+        }
+    }
+}
+
+impl PeerCredentials for MyceliumCredentials {
+    fn load(&self) -> anyhow::Result<PeerCredentialMaterial> {
+        self.inner.load()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct MyceliumDirectory {

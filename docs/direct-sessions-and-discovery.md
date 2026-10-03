@@ -21,6 +21,13 @@ Unibus core exposes two independent boundaries:
 - `PeerTransport` opens a message-oriented session using a signed session
   assertion.
 
+`unibus-quic` adds a third, transport-specific boundary: `PeerCredentials`
+loads a certificate chain, private key, and trust roots from the deployment's
+identity provider. Unibus consumes those credentials for its own mTLS session;
+it does not issue or rotate them. `PemPeerCredentials` is the standalone file
+provider. `MyceliumCredentials` uses the stable `pki/{ca,node,node-key}.pem`
+layout installed by Mycelium enrollment.
+
 `StaticPeerDirectory` provides the standalone baseline. DNS implementations
 can project SRV/A/AAAA answers into the same candidates. The optional
 `unibus-mycelium` crate queries Mycelium's newline-delimited local JSON-RPC
@@ -51,11 +58,18 @@ The standalone flow is:
 Static/DNS PeerDirectory -> DirectQuicTransport -> peer
 ```
 
-The Mycelium-assisted flow changes only discovery:
+The Mycelium-assisted flow may reuse identity and discovery independently:
 
 ```text
-MyceliumDirectory -> DirectQuicTransport -> peer
+MyceliumDirectory   -> peer endpoints
+MyceliumCredentials -> Unibus-owned QUIC/mTLS -> peer
 ```
+
+Mycelium never carries or interprets Unibus frames. Unibus authorization and
+session assertions remain separate from certificate issuance: the certificate
+authenticates the peer key, while verified Unibus claims decide which messages
+that peer may publish or consume. Deployments may use either adapter, both, or
+neither.
 
 `connect_direct_or_else` exposes routed fallback as an explicit callback and
 returns whether the selected path was `Direct` or `Fallback`. A failed direct

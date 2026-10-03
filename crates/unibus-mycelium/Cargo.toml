@@ -6,6 +6,8 @@ license.workspace = true
 description = "Optional Mycelium peer-directory adapter for Unibus"
 
 [dependencies]
+anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 unibus.workspace = true
+unibus-quic = { path = "../unibus-quic" }

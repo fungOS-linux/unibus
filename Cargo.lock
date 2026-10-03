@@ -1358,9 +1358,11 @@ dependencies = [
 name = "unibus-mycelium"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "serde",
  "serde_json",
  "unibus",
+ "unibus-quic",
 ]
 
 [[package]]
@@ -1374,6 +1376,7 @@ dependencies = [
  "rustls-pemfile",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
  "unibus",
 ]
