@@ -130,6 +130,85 @@ pub struct AdapterInterest {
     pub reason: Option<String>,
 }
 
+/// Deterministic desired-state core for an edge supervisor. Process spawning,
+/// health probes, and persistence remain host-owned side effects.
+#[derive(Debug, Clone)]
+pub struct AdapterReconciler {
+    descriptors: BTreeMap<String, AdapterDescriptor>,
+    interests: BTreeMap<String, AdapterInterest>,
+    always_on: BTreeSet<String>,
+}
+
+impl AdapterReconciler {
+    pub fn new(
+        descriptors: impl IntoIterator<Item = AdapterDescriptor>,
+        always_on: impl IntoIterator<Item = String>,
+    ) -> Result<Self> {
+        let mut indexed = BTreeMap::new();
+        for descriptor in descriptors {
+            descriptor.validate()?;
+            ensure!(
+                indexed.insert(descriptor.id.clone(), descriptor).is_none(),
+                "duplicate adapter descriptor"
+            );
+        }
+        let always_on = always_on.into_iter().collect::<BTreeSet<_>>();
+        ensure!(
+            always_on.iter().all(|id| indexed.contains_key(id)),
+            "always-on policy names an unknown adapter"
+        );
+        Ok(Self {
+            descriptors: indexed,
+            interests: BTreeMap::new(),
+            always_on,
+        })
+    }
+
+    /// Insert or renew a lease. A lease is accepted only by its named node and
+    /// for an installed, locally enabled adapter.
+    pub fn apply_interest(&mut self, local_node_id: &str, interest: AdapterInterest) -> Result<()> {
+        interest.validate()?;
+        ensure!(
+            interest.node_id == local_node_id,
+            "adapter interest targets another node"
+        );
+        let descriptor = self
+            .descriptors
+            .get(&interest.adapter_id)
+            .ok_or_else(|| anyhow::anyhow!("adapter is not installed"))?;
+        ensure!(descriptor.enabled, "adapter is disabled by local policy");
+        ensure!(descriptor.available, "adapter is unavailable");
+        self.interests.insert(interest.lease_id.clone(), interest);
+        Ok(())
+    }
+
+    pub fn expire(&mut self, now_unix_ms: u64) {
+        self.interests
+            .retain(|_, interest| interest.active_at(now_unix_ms));
+    }
+
+    pub fn desired_active(&self, adapter_id: &str, now_unix_ms: u64) -> bool {
+        let Some(descriptor) = self.descriptors.get(adapter_id) else {
+            return false;
+        };
+        descriptor.enabled
+            && descriptor.available
+            && (self.always_on.contains(adapter_id)
+                || self.interests.values().any(|interest| {
+                    interest.adapter_id == adapter_id && interest.active_at(now_unix_ms)
+                }))
+    }
+
+    pub fn active_lease_count(&self, adapter_id: &str, now_unix_ms: u64) -> u32 {
+        self.interests
+            .values()
+            .filter(|interest| interest.adapter_id == adapter_id && interest.active_at(now_unix_ms))
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX)
+    }
+}
+
 impl AdapterInterest {
     pub fn validate(&self) -> Result<()> {
         validate_id(&self.lease_id, "lease id")?;
@@ -221,5 +300,50 @@ mod tests {
             adapters: vec![adapter.clone(), adapter],
         };
         assert!(catalog.validate().is_err());
+    }
+
+    #[test]
+    fn reconciler_respects_local_policy_and_lease_expiry() {
+        let enabled = AdapterDescriptor {
+            id: "mqtt.local".into(),
+            kind: "mqtt".into(),
+            message_kinds: BTreeSet::new(),
+            enabled: true,
+            available: true,
+            labels: BTreeMap::new(),
+        };
+        let disabled = AdapterDescriptor {
+            id: "prom.host".into(),
+            kind: "prometheus".into(),
+            enabled: false,
+            ..enabled.clone()
+        };
+        let mut reconciler =
+            AdapterReconciler::new([enabled, disabled], std::iter::empty()).unwrap();
+        let lease = AdapterInterest {
+            lease_id: "canvas:home".into(),
+            consumer_id: "canvas".into(),
+            node_id: "home-pi".into(),
+            adapter_id: "mqtt.local".into(),
+            issued_at_unix_ms: 100,
+            expires_at_unix_ms: 200,
+            reason: None,
+        };
+        reconciler.apply_interest("home-pi", lease).unwrap();
+        assert!(reconciler.desired_active("mqtt.local", 150));
+        assert_eq!(reconciler.active_lease_count("mqtt.local", 150), 1);
+        reconciler.expire(200);
+        assert!(!reconciler.desired_active("mqtt.local", 200));
+
+        let denied = AdapterInterest {
+            lease_id: "canvas:metrics".into(),
+            consumer_id: "canvas".into(),
+            node_id: "home-pi".into(),
+            adapter_id: "prom.host".into(),
+            issued_at_unix_ms: 100,
+            expires_at_unix_ms: 200,
+            reason: None,
+        };
+        assert!(reconciler.apply_interest("home-pi", denied).is_err());
     }
 }

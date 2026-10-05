@@ -25,7 +25,7 @@ pub mod reconnect;
 
 pub use adapter::{
     ADAPTER_CATALOG_KIND, ADAPTER_INTEREST_KIND, ADAPTER_STATUS_KIND, AdapterCatalog,
-    AdapterDescriptor, AdapterInterest, AdapterState, AdapterStatus,
+    AdapterDescriptor, AdapterInterest, AdapterReconciler, AdapterState, AdapterStatus,
 };
 pub use auth::{AuthError, NodeClaims, OfflineVerifier};
 pub use direct::{DirectSessionClaims, DirectSessionError, DirectSessionVerifier, PeerBinding};
