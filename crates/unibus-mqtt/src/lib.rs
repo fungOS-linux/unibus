@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+pub mod subscriber;
 
 pub const MQTT_PUBLISH_CONTRACT: &str = "mqtt.publish.v1";
 pub const MQTT_BRIDGE_CAPABILITY: &str = "mqtt.bridge";

@@ -2540,6 +2540,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "unibus-bambu"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "unibus",
+ "unibus-device",
+ "unibus-mqtt",
+]
+
+[[package]]
 name = "unibus-dcp"
 version = "0.1.0"
 dependencies = [
@@ -2656,7 +2669,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "getrandom 0.4.3",
+ "rcgen",
  "rumqttc",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",

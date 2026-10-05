@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 getrandom.workspace = true
 rumqttc.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -17,3 +18,4 @@ unibus.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+rcgen = "0.14"

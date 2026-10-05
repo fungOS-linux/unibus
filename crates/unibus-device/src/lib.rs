@@ -7,6 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+pub mod printer;
+
 pub const DEVICE_SCHEMA_VERSION: u32 = 1;
 pub const DEVICE_PRESENCE_KIND: &str = "device.presence.v1";
 pub const DEVICE_BINDING_KIND: &str = "device.binding.v1";

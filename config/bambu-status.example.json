@@ -1,0 +1,20 @@
+{
+  "bus": {
+    "installation_id": "lab",
+    "producer_id": "lab-printer-1",
+    "hub_endpoint": "127.0.0.1:18790",
+    "token_file": "/absolute/private/unibus/lab-printer-1.token",
+    "zones": [
+      "lab"
+    ],
+    "capabilities": [
+      "printer.status"
+    ],
+    "schema_version": 2
+  },
+  "destination": "canvas-printers",
+  "serial": "REPLACE_SERIAL_1",
+  "mqtt_endpoint": "192.0.2.10:8883",
+  "certificate_sha256": "REPLACE_WITH_VERIFIED_LEAF_CERTIFICATE_SHA256",
+  "access_code_file": "/absolute/private/bambu/printer-1.code"
+}
