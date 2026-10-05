@@ -120,8 +120,14 @@ pub fn server_config(
     certificates: Vec<CertificateDer<'static>>,
     private_key: PrivateKeyDer<'static>,
 ) -> Result<quinn::ServerConfig> {
-    quinn::ServerConfig::with_single_cert(certificates, private_key)
-        .context("build QUIC TLS server configuration")
+    let crypto = rustls::ServerConfig::builder_with_provider(ring_provider())
+        .with_safe_default_protocol_versions()?
+        .with_no_client_auth()
+        .with_single_cert(certificates, private_key)
+        .context("build QUIC TLS server configuration")?;
+    Ok(quinn::ServerConfig::with_crypto(Arc::new(
+        quinn::crypto::rustls::QuicServerConfig::try_from(crypto)?,
+    )))
 }
 
 pub fn server_config_from_pem(cert_file: &Path, key_file: &Path) -> Result<quinn::ServerConfig> {
@@ -142,8 +148,17 @@ pub fn server_config_from_pem(cert_file: &Path, key_file: &Path) -> Result<quinn
 }
 
 pub fn client_config(root_certificates: RootCertStore) -> Result<quinn::ClientConfig> {
-    quinn::ClientConfig::with_root_certificates(Arc::new(root_certificates))
-        .context("build QUIC TLS client configuration")
+    let crypto = rustls::ClientConfig::builder_with_provider(ring_provider())
+        .with_safe_default_protocol_versions()?
+        .with_root_certificates(root_certificates)
+        .with_no_client_auth();
+    Ok(quinn::ClientConfig::new(Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?,
+    )))
+}
+
+fn ring_provider() -> Arc<rustls::crypto::CryptoProvider> {
+    Arc::new(rustls::crypto::ring::default_provider())
 }
 
 pub fn mutual_server_config(
@@ -151,10 +166,14 @@ pub fn mutual_server_config(
     private_key: PrivateKeyDer<'static>,
     client_roots: RootCertStore,
 ) -> Result<quinn::ServerConfig> {
-    let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(client_roots))
-        .build()
-        .context("build QUIC client certificate verifier")?;
-    let crypto = rustls::ServerConfig::builder()
+    let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+        Arc::new(client_roots),
+        ring_provider(),
+    )
+    .build()
+    .context("build QUIC client certificate verifier")?;
+    let crypto = rustls::ServerConfig::builder_with_provider(ring_provider())
+        .with_safe_default_protocol_versions()?
         .with_client_cert_verifier(verifier)
         .with_single_cert(certificates, private_key)
         .context("build QUIC mTLS server configuration")?;
@@ -168,7 +187,8 @@ pub fn mutual_client_config(
     private_key: PrivateKeyDer<'static>,
     server_roots: RootCertStore,
 ) -> Result<quinn::ClientConfig> {
-    let crypto = rustls::ClientConfig::builder()
+    let crypto = rustls::ClientConfig::builder_with_provider(ring_provider())
+        .with_safe_default_protocol_versions()?
         .with_root_certificates(server_roots)
         .with_client_auth_cert(certificates, private_key)
         .context("build QUIC mTLS client configuration")?;
