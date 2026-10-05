@@ -1,0 +1,19 @@
+[package]
+name = "unibus-lua"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["luau"]
+luau = ["mlua/luau", "mlua/vendored"]
+lua54 = ["mlua/lua54", "mlua/vendored"]
+
+[dependencies]
+unibus-sdk = { path = "../unibus-sdk" }
+mlua = { version = "0.12.1", features = ["serialize"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+unibus.workspace = true
+tempfile.workspace = true

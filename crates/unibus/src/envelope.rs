@@ -196,7 +196,8 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn next_request_id() -> String {
+/// Allocate a request ID before handing a command to an asynchronous transport.
+pub fn next_request_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
