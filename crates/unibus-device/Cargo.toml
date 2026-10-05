@@ -1,0 +1,12 @@
+[package]
+name = "unibus-device"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Provider-neutral hotplug device presence and binding contracts for Unibus edges."
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
