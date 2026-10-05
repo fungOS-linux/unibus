@@ -1,0 +1,18 @@
+{
+  "bus": {
+    "installation_id": "home",
+    "producer_id": "macbook-neo-hid",
+    "hub_endpoint": "127.0.0.1:18804",
+    "token_file": "/Users/ajmwagar/.config/unibus/macbook-neo-hid.token",
+    "zones": ["living-room"],
+    "capabilities": ["input.desktop.source"],
+    "schema_version": 2,
+    "read_timeout_ms": 500
+  },
+  "socket_path": "/tmp/canvas-unibus-hid.sock",
+  "destination": "compute",
+  "session_id": "canvas-neo",
+  "controller_id": "neo-keyboard-mouse",
+  "authorized_targets": ["agora-qemu-demo"],
+  "lease_ms": 250
+}

@@ -1,0 +1,17 @@
+[package]
+name = "unibus-qemu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bounded QEMU display and HID adapter for Unibus."
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+unibus.workspace = true
+unibus-input = { path = "../unibus-input" }
+unibus-media = { path = "../unibus-media" }
+
+[dev-dependencies]
+tempfile.workspace = true

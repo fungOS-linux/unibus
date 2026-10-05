@@ -1,0 +1,27 @@
+{
+  "bus": {
+    "installation_id": "home",
+    "producer_id": "agora-one-qemu",
+    "hub_endpoint": "127.0.0.1:18791",
+    "token_file": "/home/ajmwagar/.config/unibus/tokens/agora-one-qemu.token",
+    "zones": ["compute", "living-room"],
+    "capabilities": ["media.video_stream.source", "qemu.input"],
+    "schema_version": 2,
+    "read_timeout_ms": 25
+  },
+  "destination": "living-room",
+  "gst_launch": "/usr/bin/gst-launch-1.0",
+  "qmp_socket": "/run/qemu-canvas-demo/demo.qmp",
+  "vnc_host": "127.0.0.1",
+  "vnc_port": 5901,
+  "target_id": "agora-qemu-demo",
+  "stream_id": "agora-qemu-demo",
+  "display_name": "Agora One · QEMU",
+  "media_targets": ["192.168.2.74:55300", "192.168.10.82:55300"],
+  "advertised_endpoint": "udp://0.0.0.0:55300",
+  "width": 1280,
+  "height": 720,
+  "fps": 20,
+  "bitrate_kbps": 8000,
+  "ttl_ms": 30000
+}

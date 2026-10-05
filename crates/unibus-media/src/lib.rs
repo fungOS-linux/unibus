@@ -13,6 +13,8 @@ use stream_descriptors::{
     SemanticFacet, StreamDescriptorV2, V2_SCHEMA_VERSION,
 };
 
+pub use stream_descriptors::{ENDPOINT_ANNOUNCEMENT_V2_KIND, STREAM_DESCRIPTOR_V2_KIND};
+
 pub const CAMERA_STREAM_CONTRACT: &str = "camera.stream.v1";
 pub const VIDEO_STREAM_CONTRACT: &str = "media.video_stream.v1";
 pub const VIDEO_ALPHA_MASK_CONTRACT: &str = "media.video_alpha_mask.v1";
@@ -21,7 +23,236 @@ pub const CAMERA_PRESENT_CONTRACT: &str = "camera.present.v1";
 pub const AUDIO_PLAYBACK_CHUNK_CONTRACT: &str = "audio.playback_chunk";
 pub const MEDIA_SCHEMA_VERSION: u32 = 1;
 pub const VIDEO_FRAME_V2_CONTRACT: &str = "media.video.frame.v2";
+pub const ISOCHRONE_RTP_AUDIO_V1_CONTRACT: &str = "media.audio.isochrone_rtp.v1";
 pub const MAX_ALPHA_MASK_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+
+/// Local, already-authorized parameters for the one QEMU capture graph
+/// Unibus currently supports. These values are never accepted from a stream
+/// descriptor and cannot inject arbitrary GStreamer elements or properties.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QemuRfbH264UdpRuntime {
+    pub rfb_host: String,
+    pub rfb_port: u16,
+    pub udp_targets: Vec<String>,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub bitrate_kbps: u32,
+}
+
+impl QemuRfbH264UdpRuntime {
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if !safe_host(&self.rfb_host) || self.rfb_port == 0 {
+            return Err(ContractError("invalid local RFB endpoint".into()));
+        }
+        if self.udp_targets.is_empty() || self.udp_targets.len() > 32 {
+            return Err(ContractError("invalid UDP target count".into()));
+        }
+        for target in &self.udp_targets {
+            let Some((host, port)) = target.rsplit_once(':') else {
+                return Err(ContractError("UDP target must be host:port".into()));
+            };
+            if !safe_host(host) || port.parse::<u16>().ok().filter(|port| *port != 0).is_none() {
+                return Err(ContractError("invalid UDP target".into()));
+            }
+        }
+        if !(16..=7680).contains(&self.width)
+            || !(16..=4320).contains(&self.height)
+            || !(1..=60).contains(&self.fps)
+            || !(250..=200_000).contains(&self.bitrate_kbps)
+        {
+            return Err(ContractError("invalid QEMU media geometry".into()));
+        }
+        Ok(())
+    }
+
+    /// Build an argv vector for a compiled, allowlisted graph. No field can
+    /// introduce another element, property, path, or environment assignment.
+    pub fn gstreamer_args(&self) -> Result<Vec<String>, ContractError> {
+        self.validate()?;
+        Ok(vec![
+            "-q".into(),
+            "rfbsrc".into(),
+            format!("host={}", self.rfb_host),
+            format!("port={}", self.rfb_port),
+            "view-only=true".into(),
+            "shared=true".into(),
+            "incremental=true".into(),
+            "do-timestamp=true".into(),
+            "!".into(),
+            "videoconvert".into(),
+            "!".into(),
+            "videoscale".into(),
+            "!".into(),
+            "videorate".into(),
+            "!".into(),
+            format!(
+                "video/x-raw,format=NV12,width={},height={},framerate={}/1",
+                self.width, self.height, self.fps
+            ),
+            "!".into(),
+            "queue".into(),
+            "max-size-buffers=1".into(),
+            "max-size-bytes=0".into(),
+            "max-size-time=0".into(),
+            "leaky=downstream".into(),
+            "!".into(),
+            "cudaupload".into(),
+            "!".into(),
+            "nvh264enc".into(),
+            "zerolatency=true".into(),
+            "bframes=0".into(),
+            "rc-lookahead=0".into(),
+            format!("gop-size={}", self.fps),
+            format!("bitrate={}", self.bitrate_kbps),
+            "repeat-sequence-header=true".into(),
+            "!".into(),
+            "h264parse".into(),
+            "config-interval=-1".into(),
+            "!".into(),
+            "mpegtsmux".into(),
+            "alignment=7".into(),
+            "!".into(),
+            "multiudpsink".into(),
+            format!("clients={}", self.udp_targets.join(",")),
+            "sync=false".into(),
+            "async=false".into(),
+        ])
+    }
+}
+
+fn safe_host(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':' | b'[' | b']')
+        })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsochroneEncoding {
+    L16,
+    L24,
+}
+
+/// Narrow projection seam for Isochrone. Isochrone remains the owner of RTP
+/// packetization, playout, loss handling, and ASRC; this only advertises the
+/// compatible stream and an opaque route reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IsochroneRtpStream {
+    pub stream_id: String,
+    pub source_resource: String,
+    pub zone: String,
+    pub endpoint_reference: String,
+    pub generation: String,
+    pub producer: String,
+    pub encoding: IsochroneEncoding,
+    pub sample_rate_hz: u32,
+    pub channels: u16,
+    pub frames_per_packet: u32,
+    pub observed_at_unix_ms: u64,
+    pub valid_until_unix_ms: u64,
+}
+
+impl IsochroneRtpStream {
+    pub fn project_v2(&self) -> Result<MediaStreamProjectionV2, ContractError> {
+        if !(8_000..=192_000).contains(&self.sample_rate_hz)
+            || !(1..=64).contains(&self.channels)
+            || self.frames_per_packet == 0
+            || self.frames_per_packet > self.sample_rate_hz / 10
+            || self.valid_until_unix_ms <= self.observed_at_unix_ms
+        {
+            return Err(ContractError("invalid Isochrone stream geometry".into()));
+        }
+        for value in [
+            &self.stream_id,
+            &self.source_resource,
+            &self.zone,
+            &self.endpoint_reference,
+            &self.generation,
+            &self.producer,
+        ] {
+            if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+                return Err(ContractError("invalid Isochrone stream identity".into()));
+            }
+        }
+        let encoding = match self.encoding {
+            IsochroneEncoding::L16 => "l16",
+            IsochroneEncoding::L24 => "l24",
+        };
+        let provenance = ProvenanceFacet {
+            producer: self.producer.clone(),
+            calibration: None,
+            algorithm: Some("isochrone".into()),
+            transform: None,
+        };
+        let descriptor = StreamDescriptorV2 {
+            schema_version: V2_SCHEMA_VERSION,
+            stream_id: self.stream_id.clone(),
+            source_resource: self.source_resource.clone(),
+            semantic: SemanticFacet {
+                kind: "audio.program".into(),
+                dimensions: std::collections::BTreeMap::from([("zone".into(), self.zone.clone())]),
+            },
+            payload: Some(PayloadContract {
+                contract: ISOCHRONE_RTP_AUDIO_V1_CONTRACT.into(),
+                maximum_bytes: None,
+            }),
+            observation: None,
+            encoding: Some(EncodingFacet {
+                kind: encoding.into(),
+                parameters: std::collections::BTreeMap::from([(
+                    "byte_order".into(),
+                    "network".into(),
+                )]),
+            }),
+            clock: Some(ClockFacet {
+                kind: ClockKind::Rtp,
+                rate_hz: Some(u64::from(self.sample_rate_hz)),
+                timestamp_bits: Some(32),
+                synchronization: Some("isochrone.asrc".into()),
+            }),
+            media: Some(MediaFacet {
+                width: None,
+                height: None,
+                frame_rate_millihz: None,
+                sample_rate_hz: Some(self.sample_rate_hz),
+                channels: Some(self.channels),
+                frames_per_packet: Some(self.frames_per_packet),
+            }),
+            delivery: DeliveryFacet {
+                class: DeliveryClass::Stream,
+                maximum_age_ms: Some(100),
+                coalescing: None,
+            },
+            required_consumer_capabilities: vec![format!("media.audio.decode.{encoding}")],
+            provenance: provenance.clone(),
+        };
+        let endpoints = EndpointAnnouncementV2 {
+            schema_version: V2_SCHEMA_VERSION,
+            stream_id: self.stream_id.clone(),
+            generation: Some(self.generation.clone()),
+            bindings: vec![EndpointBindingV2 {
+                transport: "rtp-udp".into(),
+                profile: "isochrone-rtp-v1".into(),
+                role: ConnectionRole::Connectionless,
+                endpoint_reference: self.endpoint_reference.clone(),
+                requires: "media.transport.isochrone".into(),
+            }],
+            observed_at_unix_ms: self.observed_at_unix_ms,
+            valid_until_unix_ms: self.valid_until_unix_ms,
+            provenance,
+        };
+        descriptor.validate().map_err(ContractError)?;
+        endpoints
+            .validate(self.observed_at_unix_ms)
+            .map_err(ContractError)?;
+        Ok(MediaStreamProjectionV2 {
+            descriptor,
+            endpoints,
+        })
+    }
+}
 
 /// A complete, expiring alpha plane for one video-stream generation.
 ///
@@ -817,5 +1048,52 @@ mod tests {
         request.validate().unwrap();
         let wire = serde_json::to_string(&request).unwrap();
         assert!(!wire.contains("endpoint"));
+    }
+
+    #[test]
+    fn qemu_runtime_is_compiled_and_rejects_pipeline_injection() {
+        let mut runtime = QemuRfbH264UdpRuntime {
+            rfb_host: "127.0.0.1".into(),
+            rfb_port: 5901,
+            udp_targets: vec!["192.0.2.1:55300".into()],
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 8_000,
+        };
+        let args = runtime.gstreamer_args().unwrap();
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.as_str() == "nvh264enc")
+                .count(),
+            1
+        );
+        runtime.rfb_host = "127.0.0.1 ! filesink location=/tmp/leak".into();
+        assert!(runtime.gstreamer_args().is_err());
+    }
+
+    #[test]
+    fn isochrone_projects_rtp_shape_without_reimplementing_audio() {
+        let projection = IsochroneRtpStream {
+            stream_id: "audio/studio/program".into(),
+            source_resource: "audio-device/scarlett-18i20".into(),
+            zone: "studio".into(),
+            endpoint_reference: "isochrone/route/studio-program".into(),
+            generation: "route-7".into(),
+            producer: "isochrone-agent".into(),
+            encoding: IsochroneEncoding::L24,
+            sample_rate_hz: 48_000,
+            channels: 2,
+            frames_per_packet: 48,
+            observed_at_unix_ms: 1_000,
+            valid_until_unix_ms: 31_000,
+        }
+        .project_v2()
+        .unwrap();
+        assert_eq!(projection.descriptor.encoding.unwrap().kind, "l24");
+        assert_eq!(projection.descriptor.clock.unwrap().kind, ClockKind::Rtp);
+        assert_eq!(projection.endpoints.bindings[0].profile, "isochrone-rtp-v1");
+        let wire = serde_json::to_string(&projection.endpoints).unwrap();
+        assert!(!wire.contains("192.168."));
     }
 }
