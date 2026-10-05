@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -219,9 +219,16 @@ impl Client {
         let registration_request = register.request_id.clone();
         let writer = Arc::new(Mutex::new(stream.try_clone()?));
         framing::write_frame(&mut *writer.lock().unwrap(), &register, &[])?;
-        let mut reader = stream.try_clone()?;
+        let mut reader = FrameReader::new(stream.try_clone()?);
+        let registration_deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let (reply, _) = framing::read_frame(&mut reader)?;
+            ensure!(
+                Instant::now() < registration_deadline,
+                "timed out waiting for hub registration reply"
+            );
+            let Some((reply, _)) = reader.try_read()? else {
+                continue;
+            };
             let is_registration_reply = reply.message.kind == kinds::V1_REPLY
                 && reply
                     .message
@@ -277,7 +284,7 @@ impl Client {
         }
         Ok(Self {
             config,
-            reader: Mutex::new(FrameReader::new(reader)),
+            reader: Mutex::new(reader),
             writer,
             stop,
         })
