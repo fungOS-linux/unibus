@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.fpl.unibus-adb-tunnel</string>
+  <key>ProgramArguments</key><array><string>/Users/ajmwagar/.local/bin/unibus-adb</string><string>tunnel</string><string>darwin-averys-mac-studio</string></array>
+  <key>EnvironmentVariables</key><dict><key>MYCELIUM_BIN</key><string>/Users/ajmwagar/.local/bin/mycelium</string></dict>
+  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>5</integer>
+  <key>StandardErrorPath</key><string>/Users/ajmwagar/.config/unibus/adb-studio/tunnel.log</string>
+</dict></plist>

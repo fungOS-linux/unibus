@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.fpl.unibus-adb-advertise</string>
+  <key>ProgramArguments</key><array><string>/usr/bin/dns-sd</string><string>-R</string><string>Unibus Studio ADB via SSH</string><string>_ssh._tcp</string><string>local</string><string>22</string><string>purpose=unibus-adb</string><string>access=ssh</string><string>hub=127.0.0.1:18793</string><string>producer=studio-adb</string><string>contract=adb.socket.v1</string></array>
+  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>5</integer>
+  <key>StandardOutPath</key><string>/Users/ajmwagar/.config/unibus/adb-studio/advertise.log</string>
+  <key>StandardErrorPath</key><string>/Users/ajmwagar/.config/unibus/adb-studio/advertise.log</string>
+</dict></plist>

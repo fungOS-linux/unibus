@@ -407,6 +407,9 @@ impl Hub {
             .set_write_timeout(Some(WRITE_TIMEOUT))
             .context("set write timeout")?;
         let peer = stream.peer_addr()?;
+        // Interactive byte protocols (ADB, HID, RPC) must not incur Nagle's
+        // small-frame delay on the hub-to-client side.
+        stream.set_nodelay(true).context("set TCP_NODELAY")?;
         debug!("incoming connection from {peer}");
 
         let mut reader = stream.try_clone()?;

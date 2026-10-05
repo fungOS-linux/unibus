@@ -1,0 +1,16 @@
+[package]
+name = "unibus-adb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+unibus.workspace = true
+unibus-router = { path = "../unibus-router" }
+
+[dev-dependencies]
+tempfile.workspace = true

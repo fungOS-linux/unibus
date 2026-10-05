@@ -2528,6 +2528,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "unibus-adb"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "unibus",
+ "unibus-router",
+]
+
+[[package]]
 name = "unibus-dcp"
 version = "0.1.0"
 dependencies = [
