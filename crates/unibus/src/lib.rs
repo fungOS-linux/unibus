@@ -22,6 +22,7 @@ pub mod kinds;
 pub mod peer;
 pub mod qos;
 pub mod reconnect;
+pub mod stream;
 
 pub use adapter::{
     ADAPTER_CATALOG_KIND, ADAPTER_INTEREST_KIND, ADAPTER_STATUS_KIND, AdapterCatalog,
@@ -45,3 +46,7 @@ pub use peer::{
 };
 pub use qos::Qos;
 pub use reconnect::{ReconnectBackoff, ReconnectPolicy};
+pub use stream::{
+    STREAM_EVENT_KIND, STREAM_INTEREST_KIND, StreamDirection, StreamEvent, StreamImportance,
+    StreamInterest, StreamRequirement,
+};

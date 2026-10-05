@@ -14,9 +14,11 @@ mod outbound;
 pub mod plugin;
 pub mod quic;
 pub mod registry;
+pub mod stream_router;
 
 pub use config::{HubConfig, NodeConfig, QuicConfig, RouteRule, RouteTarget};
 pub use hub::Hub;
 pub use plugin::HubPlugin;
 pub use plugin::{Delivery, HubHandle, Sink};
 pub use registry::{EdgeNode, NodeRegistry};
+pub use stream_router::StreamRouter;

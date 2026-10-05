@@ -45,6 +45,7 @@ impl Qos {
             | "audio.start_capture"
             | "input.gamepad_state"
             | "input.desktop_state.v1"
+            | "unibus.stream.event.v1"
             | "rlcd.decision.v1"
             | "rf.csi.frame.v1"
             | "rf.csi.features.v1"
@@ -112,6 +113,11 @@ mod tests {
             Qos::of_kind("stream.observation.snapshot.v2"),
             Qos::Snapshot
         );
+    }
+
+    #[test]
+    fn generic_stream_events_are_latency_first() {
+        assert_eq!(Qos::of_kind("unibus.stream.event.v1"), Qos::Stream);
     }
 
     #[test]

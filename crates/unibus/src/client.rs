@@ -207,6 +207,10 @@ impl Client {
         Ok(envelope)
     }
 
+    pub fn config(&self) -> &ClientConfig {
+        &self.config
+    }
+
     pub fn send(&self, envelope: &Envelope, payload: &[u8]) -> Result<()> {
         let mut envelope = envelope.clone();
         envelope.schema_version = self.config.schema_version;

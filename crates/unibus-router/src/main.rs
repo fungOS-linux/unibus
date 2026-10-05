@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use unibus_router::{Hub, config::HubConfig};
+use unibus_router::{Hub, StreamRouter, config::HubConfig};
 
 fn main() -> Result<()> {
     if matches!(
@@ -27,5 +27,5 @@ fn main() -> Result<()> {
         .nth(1)
         .ok_or_else(|| anyhow::anyhow!("usage: unibus-hub <config.json>"))?;
     let config = HubConfig::read(std::path::Path::new(&path))?;
-    Arc::new(Hub::new(config)?).serve()
+    Arc::new(Hub::new(config)?.with_plugin(Arc::new(StreamRouter::default()))).serve()
 }
