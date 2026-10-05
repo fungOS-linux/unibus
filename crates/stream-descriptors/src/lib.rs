@@ -318,6 +318,67 @@ pub struct EndpointAnnouncementV2 {
     pub provenance: ProvenanceFacet,
 }
 
+/// Bounded capabilities of one stream consumer or trusted runtime adapter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumerProfileV2 {
+    pub consumer_id: String,
+    pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub encodings: Vec<EncodingSupport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clocks: Vec<ClockSupport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transports: Vec<TransportSupport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_limits: Option<MediaLimits>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncodingSupport {
+    pub kind: String,
+    /// Exact parameter values supported by this profile. Multiple profiles
+    /// for one encoding are represented by multiple entries.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClockSupport {
+    pub kind: ClockKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum_rate_hz: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum_timestamp_bits: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransportSupport {
+    pub transport: String,
+    pub profiles: Vec<String>,
+    pub roles: Vec<ConnectionRole>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum_height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum_frame_rate_millihz: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum_sample_rate_hz: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum_channels: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum_frames_per_packet: Option<u32>,
+}
+
 /// One typed observation emitted under a validated descriptor. Values contain
 /// no dynamic labels; bounded identity dimensions live in the descriptor.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -752,6 +813,194 @@ impl EndpointAnnouncementV2 {
             return Err("endpoint freshness window is invalid or expired".into());
         }
         self.provenance.validate()
+    }
+}
+
+impl ConsumerProfileV2 {
+    pub fn validate(&self) -> Result<(), String> {
+        token("consumer_id", &self.consumer_id, 128, true)?;
+        bounded_unique_tokens("consumer capabilities", &self.capabilities, 64, 128, false)?;
+        if self.encodings.len() > 32 || self.clocks.len() > 16 || self.transports.len() > 32 {
+            return Err("consumer profile exceeds facet limits".into());
+        }
+        for encoding in &self.encodings {
+            token("consumer encoding", &encoding.kind, 64, false)?;
+            bounded_map(
+                "consumer encoding parameters",
+                &encoding.parameters,
+                16,
+                64,
+                96,
+            )?;
+        }
+        for clock in &self.clocks {
+            if clock
+                .maximum_rate_hz
+                .is_some_and(|rate| rate == 0 || rate > 1_000_000_000)
+                || clock
+                    .maximum_timestamp_bits
+                    .is_some_and(|bits| !(8..=64).contains(&bits))
+            {
+                return Err("consumer clock bounds are invalid".into());
+            }
+        }
+        for transport in &self.transports {
+            token("consumer transport", &transport.transport, 64, false)?;
+            bounded_unique_tokens(
+                "consumer transport profiles",
+                &transport.profiles,
+                32,
+                64,
+                false,
+            )?;
+            if transport.profiles.is_empty()
+                || transport.roles.is_empty()
+                || transport.roles.len() > 3
+                || has_duplicates(&transport.roles)
+            {
+                return Err("consumer transport profiles or roles are invalid".into());
+            }
+        }
+        if let Some(limits) = &self.media_limits {
+            limits.validate()?;
+        }
+        Ok(())
+    }
+
+    /// Validate all stable facets, then return compatible live bindings in a
+    /// deterministic order independent of announcement ordering.
+    pub fn compatible_bindings<'a>(
+        &self,
+        descriptor: &StreamDescriptorV2,
+        announcement: &'a EndpointAnnouncementV2,
+        now_unix_ms: u64,
+    ) -> Result<Vec<&'a EndpointBindingV2>, String> {
+        self.validate()?;
+        descriptor.validate()?;
+        announcement.validate(now_unix_ms)?;
+        if descriptor.stream_id != announcement.stream_id {
+            return Err("descriptor and endpoint announcement stream_id differ".into());
+        }
+        for required in &descriptor.required_consumer_capabilities {
+            if !self.capabilities.contains(required) {
+                return Err(format!("consumer lacks required capability {required}"));
+            }
+        }
+        if let Some(encoding) = &descriptor.encoding
+            && !self.encodings.iter().any(|supported| {
+                supported.kind == encoding.kind
+                    && encoding
+                        .parameters
+                        .iter()
+                        .all(|(name, value)| supported.parameters.get(name) == Some(value))
+            })
+        {
+            return Err(format!(
+                "consumer does not support encoding {}",
+                encoding.kind
+            ));
+        }
+        if let Some(clock) = &descriptor.clock
+            && !self.clocks.iter().any(|supported| supported.accepts(clock))
+        {
+            return Err(format!("consumer does not support {:?} clock", clock.kind));
+        }
+        if let Some(media) = &descriptor.media {
+            self.media_limits
+                .as_ref()
+                .ok_or_else(|| "consumer declares no media limits".to_string())?
+                .accepts(media)?;
+        }
+
+        let mut compatible: Vec<_> = announcement
+            .bindings
+            .iter()
+            .filter(|binding| {
+                self.capabilities.contains(&binding.requires)
+                    && self.transports.iter().any(|transport| {
+                        transport.transport == binding.transport
+                            && transport.profiles.contains(&binding.profile)
+                            && transport.roles.contains(&binding.role)
+                    })
+            })
+            .collect();
+        compatible.sort_by(|left, right| {
+            (&left.transport, &left.profile, &left.endpoint_reference).cmp(&(
+                &right.transport,
+                &right.profile,
+                &right.endpoint_reference,
+            ))
+        });
+        if compatible.is_empty() {
+            return Err("no endpoint binding matches consumer transport grants".into());
+        }
+        Ok(compatible)
+    }
+}
+
+impl ClockSupport {
+    fn accepts(&self, clock: &ClockFacet) -> bool {
+        self.kind == clock.kind
+            && clock
+                .rate_hz
+                .is_none_or(|rate| self.maximum_rate_hz.is_some_and(|maximum| rate <= maximum))
+            && clock.timestamp_bits.is_none_or(|bits| {
+                self.maximum_timestamp_bits
+                    .is_some_and(|maximum| bits <= maximum)
+            })
+    }
+}
+
+impl MediaLimits {
+    fn validate(&self) -> Result<(), String> {
+        if [
+            self.maximum_width,
+            self.maximum_height,
+            self.maximum_frame_rate_millihz,
+            self.maximum_sample_rate_hz,
+            self.maximum_frames_per_packet,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| value == 0)
+            || self.maximum_channels == Some(0)
+        {
+            return Err("consumer media limits must be non-zero".into());
+        }
+        Ok(())
+    }
+
+    fn accepts(&self, media: &MediaFacet) -> Result<(), String> {
+        for (name, actual, maximum) in [
+            ("width", media.width, self.maximum_width),
+            ("height", media.height, self.maximum_height),
+            (
+                "frame_rate_millihz",
+                media.frame_rate_millihz,
+                self.maximum_frame_rate_millihz,
+            ),
+            (
+                "sample_rate_hz",
+                media.sample_rate_hz,
+                self.maximum_sample_rate_hz,
+            ),
+            (
+                "frames_per_packet",
+                media.frames_per_packet,
+                self.maximum_frames_per_packet,
+            ),
+        ] {
+            if actual.is_some_and(|actual| maximum.is_none_or(|maximum| actual > maximum)) {
+                return Err(format!("consumer media limit rejects {name}"));
+            }
+        }
+        if media
+            .channels
+            .is_some_and(|actual| self.maximum_channels.is_none_or(|maximum| actual > maximum))
+        {
+            return Err("consumer media limit rejects channels".into());
+        }
+        Ok(())
     }
 }
 

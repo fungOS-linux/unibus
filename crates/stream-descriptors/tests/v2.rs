@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use stream_descriptors::{
-    EndpointAnnouncementV2, OBSERVATION_SNAPSHOT_V2_KIND, ObservationDatum, ObservationSampleV2,
-    StreamDescriptorV2,
+    ClockKind, ClockSupport, ConnectionRole, ConsumerProfileV2, EncodingSupport,
+    EndpointAnnouncementV2, MediaLimits, OBSERVATION_SNAPSHOT_V2_KIND, ObservationDatum,
+    ObservationSampleV2, StreamDescriptorV2, TransportSupport,
 };
 
 fn assert_descriptor_golden(source: &str) -> StreamDescriptorV2 {
@@ -151,6 +152,130 @@ fn csi_sample_enforces_vector_bound_and_finite_values() {
         },
     );
     assert!(invalid.validate_against(&descriptor, 1_050).is_err());
+}
+
+#[test]
+fn consumer_matching_is_exact_and_deterministic() {
+    let descriptor: StreamDescriptorV2 =
+        serde_json::from_str(include_str!("fixtures/radioman-spectrum-v2.json")).unwrap();
+    let mut endpoints: EndpointAnnouncementV2 =
+        serde_json::from_str(include_str!("fixtures/radioman-endpoints-v2.json")).unwrap();
+    let mut earlier = endpoints.bindings[0].clone();
+    earlier.endpoint_reference = "radioman/a-spectrum".into();
+    endpoints.bindings.push(earlier);
+
+    let consumer = ConsumerProfileV2 {
+        consumer_id: "canvas/studio".into(),
+        capabilities: vec!["rf.spectrum.consume".into()],
+        encodings: vec![EncodingSupport {
+            kind: "json-f32-dbfs".into(),
+            parameters: BTreeMap::new(),
+        }],
+        clocks: vec![ClockSupport {
+            kind: ClockKind::WallClock,
+            maximum_rate_hz: None,
+            maximum_timestamp_bits: None,
+        }],
+        transports: vec![TransportSupport {
+            transport: "unibus".into(),
+            profiles: vec!["envelope-v1".into()],
+            roles: vec![ConnectionRole::Connectionless],
+        }],
+        media_limits: None,
+    };
+    let matches = consumer
+        .compatible_bindings(&descriptor, &endpoints, 30_000)
+        .unwrap();
+    assert_eq!(matches.len(), 2);
+    assert_eq!(matches[0].endpoint_reference, "radioman/a-spectrum");
+
+    let mut denied = consumer;
+    denied.capabilities.clear();
+    let error = denied
+        .compatible_bindings(&descriptor, &endpoints, 30_000)
+        .unwrap_err();
+    assert!(error.contains("rf.spectrum.consume"));
+}
+
+#[test]
+fn media_matching_checks_codec_clock_geometry_and_role() {
+    let descriptor: StreamDescriptorV2 = serde_json::from_value(serde_json::json!({
+        "schema_version": 2,
+        "stream_id": "camera/front-door/live",
+        "source_resource": "camera/front-door",
+        "semantic": {"kind": "video.camera"},
+        "payload": {"contract": "media.video.frame.v1", "maximum_bytes": 8388608},
+        "encoding": {"kind": "h264", "parameters": {"profile": "high", "level": "4.1"}},
+        "clock": {"kind": "media", "rate_hz": 90000, "timestamp_bits": 32},
+        "media": {"width": 1920, "height": 1080, "frame_rate_millihz": 30000},
+        "delivery": {"class": "stream", "maximum_age_ms": 1000},
+        "required_consumer_capabilities": ["media.video.decode.h264"],
+        "provenance": {"producer": "frigate"}
+    }))
+    .unwrap();
+    let endpoints: EndpointAnnouncementV2 = serde_json::from_value(serde_json::json!({
+        "schema_version": 2,
+        "stream_id": "camera/front-door/live",
+        "generation": "boot-1",
+        "bindings": [{
+            "transport": "rtsp",
+            "profile": "rtsp-1.0",
+            "role": "connector",
+            "endpoint_reference": "frigate/front-door",
+            "requires": "media.transport.rtsp"
+        }],
+        "observed_at_unix_ms": 1000,
+        "valid_until_unix_ms": 31000,
+        "provenance": {"producer": "frigate"}
+    }))
+    .unwrap();
+    let mut consumer = ConsumerProfileV2 {
+        consumer_id: "gstreamer/studio".into(),
+        capabilities: vec![
+            "media.video.decode.h264".into(),
+            "media.transport.rtsp".into(),
+        ],
+        encodings: vec![EncodingSupport {
+            kind: "h264".into(),
+            parameters: BTreeMap::from([
+                ("profile".into(), "high".into()),
+                ("level".into(), "4.1".into()),
+            ]),
+        }],
+        clocks: vec![ClockSupport {
+            kind: ClockKind::Media,
+            maximum_rate_hz: Some(90_000),
+            maximum_timestamp_bits: Some(32),
+        }],
+        transports: vec![TransportSupport {
+            transport: "rtsp".into(),
+            profiles: vec!["rtsp-1.0".into()],
+            roles: vec![ConnectionRole::Connector],
+        }],
+        media_limits: Some(MediaLimits {
+            maximum_width: Some(1920),
+            maximum_height: Some(1080),
+            maximum_frame_rate_millihz: Some(60_000),
+            maximum_sample_rate_hz: None,
+            maximum_channels: None,
+            maximum_frames_per_packet: None,
+        }),
+    };
+    assert_eq!(
+        consumer
+            .compatible_bindings(&descriptor, &endpoints, 30_000)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    consumer.media_limits.as_mut().unwrap().maximum_width = Some(1280);
+    assert!(
+        consumer
+            .compatible_bindings(&descriptor, &endpoints, 30_000)
+            .unwrap_err()
+            .contains("width")
+    );
 }
 
 #[test]
