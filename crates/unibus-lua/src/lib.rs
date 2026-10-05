@@ -1,4 +1,5 @@
 //! Install into a host-owned VM; no network-thread Lua callbacks.
+//! LuaJIT is the default backend; select Luau explicitly for existing Canvas hosts.
 use mlua::{Lua, LuaSerdeExt, UserData, UserDataMethods, Value};
 use unibus_sdk::{Publish, Session};
 
@@ -37,6 +38,27 @@ pub fn install(lua: &Lua) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "luajit")]
+    #[test]
+    fn luajit_compiles_a_hot_loop() {
+        let lua = Lua::new();
+        install(&lua).unwrap();
+        lua.load(
+            r#"
+            assert(type(jit) == "table")
+            assert(jit.version:match("LuaJIT"))
+            assert(jit.status(), "LuaJIT compiler is disabled")
+            jit.flush()
+            jit.opt.start("hotloop=1")
+            local sum = 0
+            for i = 1, 10000 do sum = sum + i end
+            assert(sum == 50005000)
+            assert(require("jit.util").traceinfo(1), "hot loop did not produce a JIT trace")
+        "#,
+        )
+        .exec()
+        .unwrap();
+    }
     #[test]
     fn attached_session_polls_nil_and_correlates_publish() {
         use std::{

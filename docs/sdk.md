@@ -1,7 +1,7 @@
 # Embedded Unibus SDK v1
 
 `unibus-sdk` owns a shared Rust control-plane session. `unibus-lua` embeds it
-directly through mlua (Luau by default, matching Canvas); `unibus-ffi` exposes
+directly through mlua (LuaJIT by default); `unibus-ffi` exposes
 the same implementation through a C ABI. There is no extra daemon or protocol.
 
 ## Contract
@@ -36,8 +36,27 @@ token-source selection. Router grants must still limit that session's authority.
 
 ## Lua host
 
-Call `unibus_lua::install(&lua)` in your Rust host. The default backend is Luau;
+Call `unibus_lua::install(&lua)` in your Rust host. The default backend is
+vendored LuaJIT: no system Lua installation is required. Select exactly one
+backend across the host's dependency graph. Existing Canvas hosts still use
+Luau and must select `default-features = false, features = ["luau"]`.
 Lua 5.4 hosts select `default-features = false, features = ["lua54"]`.
+
+```toml
+# Standalone LuaJIT host (default)
+unibus-lua = { path = "../unibus/crates/unibus-lua" }
+
+# Existing Canvas/Luau host: use this instead, not both.
+# unibus-lua = { path = "../unibus/crates/unibus-lua", default-features = false, features = ["luau"] }
+```
+
+The publish/poll/status contract is identical on all backends. LuaJIT is not
+Luau's optional JIT backend and does not accept Luau-specific syntax. This
+SDK change does not migrate Canvas's runtime or existing scripts. Hosts own VM
+creation and sandbox policy; do not enable LuaJIT's unsafe FFI library for
+untrusted widgets. Network/framing remains Rust-owned; JIT accelerates script
+computation, not network latency. Backend support follows [mlua's feature
+contract](https://github.com/mlua-rs/mlua#feature-flags).
 
 ```lua
 local bus = unibus.connect({
@@ -70,6 +89,14 @@ C errors rather than leaking credential-bearing transport diagnostics.
 `cargo check -p unibus-sdk -p unibus-lua -p unibus-ffi`
 
 `cargo test -p unibus-sdk -p unibus-lua -p unibus-ffi`
+
+The default suite checks that LuaJIT is enabled and a hot loop generates a
+compiled trace, as well as exercising full-duplex messaging through the VM.
+Check alternative hosts independently (backend features are mutually exclusive):
+
+`cargo test -p unibus-lua --no-default-features --features luau`
+
+`cargo test -p unibus-lua --no-default-features --features lua54`
 
 This slice does not yet wire Canvas widgets to the module, add service catalog
 caching, or add typed DCP execution helpers. Those should reuse owner crates,
