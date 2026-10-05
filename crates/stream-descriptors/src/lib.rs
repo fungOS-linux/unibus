@@ -15,9 +15,147 @@ pub const STREAM_DESCRIPTOR_V2_KIND: &str = "stream.descriptor.v2";
 pub const ENDPOINT_ANNOUNCEMENT_V2_KIND: &str = "stream.endpoints.v2";
 pub const OBSERVATION_STREAM_V2_KIND: &str = "stream.observation.stream.v2";
 pub const OBSERVATION_SNAPSHOT_V2_KIND: &str = "stream.observation.snapshot.v2";
+pub const CLOCK_CORRELATION_V1_KIND: &str = "stream.clock.correlation.v1";
 pub const V2_SCHEMA_VERSION: u32 = 2;
 
 const MAXIMUM_AGE_MS: u64 = 24 * 60 * 60 * 1_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClockQuality {
+    Unsynchronized,
+    Estimated,
+    Synchronized,
+    Traceable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClockSynchronizationMethod {
+    FreeRunning,
+    Measured,
+    Ntp,
+    Ptp,
+    Hardware,
+}
+
+/// One expiring affine mapping from a producer counter to Unix time.
+///
+/// Clock owners calculate this mapping. Unibus only validates and carries it;
+/// it does not estimate drift, discipline clocks, or perform ASRC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClockCorrelationV1 {
+    pub schema_version: u32,
+    pub mapping_id: String,
+    pub source_clock_id: String,
+    /// Changes whenever the producer counter restarts or its epoch changes.
+    pub source_generation: String,
+    pub source_rate_hz: u64,
+    pub source_timestamp_bits: u8,
+    pub anchor_source_ticks: u64,
+    pub anchor_unix_ns: u64,
+    /// Signed measured correction relative to the nominal source rate.
+    pub rate_adjustment_ppb: i64,
+    pub uncertainty_ns: u64,
+    pub synchronization_method: ClockSynchronizationMethod,
+    pub quality: ClockQuality,
+    pub observed_at_unix_ms: u64,
+    pub valid_until_unix_ms: u64,
+}
+
+impl ClockCorrelationV1 {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != 1 {
+            return Err("unsupported clock correlation schema".into());
+        }
+        token("mapping_id", &self.mapping_id, 128, true)?;
+        token("source_clock_id", &self.source_clock_id, 128, true)?;
+        token("source_generation", &self.source_generation, 128, true)?;
+        if self.source_rate_hz == 0 || self.source_rate_hz > 1_000_000_000 {
+            return Err("clock rate is out of bounds".into());
+        }
+        if !(8..=64).contains(&self.source_timestamp_bits) {
+            return Err("clock timestamp width is out of bounds".into());
+        }
+        if self.source_timestamp_bits < 64
+            && self.anchor_source_ticks >= (1_u64 << self.source_timestamp_bits)
+        {
+            return Err("clock anchor exceeds timestamp width".into());
+        }
+        if self.rate_adjustment_ppb.unsigned_abs() > 1_000_000 {
+            return Err("clock rate adjustment exceeds 1000 ppm".into());
+        }
+        if self.uncertainty_ns > 3_600_000_000_000 {
+            return Err("clock uncertainty exceeds one hour".into());
+        }
+        if self.valid_until_unix_ms <= self.observed_at_unix_ms
+            || self.valid_until_unix_ms - self.observed_at_unix_ms > MAXIMUM_AGE_MS
+        {
+            return Err("clock correlation validity is invalid".into());
+        }
+        if matches!(
+            self.synchronization_method,
+            ClockSynchronizationMethod::FreeRunning
+        ) && self.quality > ClockQuality::Estimated
+        {
+            return Err("free-running clock overstates synchronization quality".into());
+        }
+        Ok(())
+    }
+
+    pub fn map_to_unix_ns(
+        &self,
+        source_ticks: u64,
+        source_generation: &str,
+        now_unix_ms: u64,
+        minimum_quality: ClockQuality,
+    ) -> Result<u64, String> {
+        self.validate()?;
+        if now_unix_ms < self.observed_at_unix_ms || now_unix_ms >= self.valid_until_unix_ms {
+            return Err("clock correlation is stale or future-dated".into());
+        }
+        if source_generation != self.source_generation {
+            return Err("clock generation changed".into());
+        }
+        if self.quality < minimum_quality {
+            return Err("clock synchronization quality is insufficient".into());
+        }
+        let delta = forward_wrapped_delta(
+            self.anchor_source_ticks,
+            source_ticks,
+            self.source_timestamp_bits,
+        )?;
+        let nominal_ns = u128::from(delta)
+            .checked_mul(1_000_000_000)
+            .ok_or_else(|| "clock mapping overflow".to_string())?
+            / u128::from(self.source_rate_hz);
+        let scale = 1_000_000_000_i128 + i128::from(self.rate_adjustment_ppb);
+        let adjusted_ns = i128::try_from(nominal_ns)
+            .map_err(|_| "clock mapping overflow".to_string())?
+            .checked_mul(scale)
+            .ok_or_else(|| "clock mapping overflow".to_string())?
+            / 1_000_000_000_i128;
+        let adjusted_ns = u64::try_from(adjusted_ns)
+            .map_err(|_| "clock mapping precedes its anchor".to_string())?;
+        self.anchor_unix_ns
+            .checked_add(adjusted_ns)
+            .ok_or_else(|| "clock mapping overflow".to_string())
+    }
+}
+
+fn forward_wrapped_delta(anchor: u64, value: u64, bits: u8) -> Result<u64, String> {
+    let (delta, half_range) = if bits == 64 {
+        (value.wrapping_sub(anchor), 1_u64 << 63)
+    } else {
+        let modulus = 1_u64 << bits;
+        ((value + modulus - anchor) % modulus, modulus / 2)
+    };
+    if delta >= half_range {
+        return Err("clock timestamp is before or ambiguously far from anchor".into());
+    }
+    Ok(delta)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1248,5 +1386,79 @@ mod tests {
         };
         announcement.validate(150).unwrap();
         assert!(announcement.validate(200).is_err());
+    }
+
+    fn correlation(bits: u8, anchor: u64) -> ClockCorrelationV1 {
+        ClockCorrelationV1 {
+            schema_version: 1,
+            mapping_id: "isochrone/studio/program".into(),
+            source_clock_id: "rtp/studio/program".into(),
+            source_generation: "sender-boot-7".into(),
+            source_rate_hz: 48_000,
+            source_timestamp_bits: bits,
+            anchor_source_ticks: anchor,
+            anchor_unix_ns: 10_000_000_000,
+            rate_adjustment_ppb: 12_000,
+            uncertainty_ns: 250_000,
+            synchronization_method: ClockSynchronizationMethod::Measured,
+            quality: ClockQuality::Synchronized,
+            observed_at_unix_ms: 10_000,
+            valid_until_unix_ms: 40_000,
+        }
+    }
+
+    #[test]
+    fn correlation_maps_forward_across_timestamp_wrap() {
+        let mapping = correlation(16, 65_500);
+        let unix_ns = mapping
+            .map_to_unix_ns(12, "sender-boot-7", 20_000, ClockQuality::Estimated)
+            .unwrap();
+        // 48 ticks across wrap are exactly 1ms before the measured 12ppm
+        // correction is applied.
+        assert_eq!(unix_ns, 10_001_000_012);
+    }
+
+    #[test]
+    fn restart_staleness_and_ambiguous_direction_fail_closed() {
+        let mapping = correlation(16, 1_000);
+        assert!(
+            mapping
+                .map_to_unix_ns(1_048, "sender-boot-8", 20_000, ClockQuality::Estimated)
+                .is_err()
+        );
+        assert!(
+            mapping
+                .map_to_unix_ns(1_048, "sender-boot-7", 40_000, ClockQuality::Estimated)
+                .is_err()
+        );
+        assert!(
+            mapping
+                .map_to_unix_ns(900, "sender-boot-7", 20_000, ClockQuality::Estimated)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn consumers_detect_decreasing_synchronization_quality() {
+        let mut mapping = correlation(32, 1_000);
+        mapping.quality = ClockQuality::Estimated;
+        assert!(
+            mapping
+                .map_to_unix_ns(1_048, "sender-boot-7", 20_000, ClockQuality::Synchronized)
+                .is_err()
+        );
+        assert!(
+            mapping
+                .map_to_unix_ns(1_048, "sender-boot-7", 20_000, ClockQuality::Estimated)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn free_running_clock_cannot_claim_traceable_quality() {
+        let mut mapping = correlation(32, 1_000);
+        mapping.synchronization_method = ClockSynchronizationMethod::FreeRunning;
+        mapping.quality = ClockQuality::Traceable;
+        assert!(mapping.validate().is_err());
     }
 }

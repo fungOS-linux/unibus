@@ -8,9 +8,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use stream_descriptors::{
-    ClockFacet, ClockKind, ConnectionRole, DeliveryClass, DeliveryFacet, EncodingFacet,
-    EndpointAnnouncementV2, EndpointBindingV2, MediaFacet, PayloadContract, ProvenanceFacet,
-    SemanticFacet, StreamDescriptorV2, V2_SCHEMA_VERSION,
+    ClockCorrelationV1, ClockFacet, ClockKind, ClockQuality, ClockSynchronizationMethod,
+    ConnectionRole, DeliveryClass, DeliveryFacet, EncodingFacet, EndpointAnnouncementV2,
+    EndpointBindingV2, MediaFacet, PayloadContract, ProvenanceFacet, SemanticFacet,
+    StreamDescriptorV2, V2_SCHEMA_VERSION,
 };
 
 pub use stream_descriptors::{ENDPOINT_ANNOUNCEMENT_V2_KIND, STREAM_DESCRIPTOR_V2_KIND};
@@ -77,7 +78,11 @@ impl QemuRfbH264UdpRuntime {
             format!("port={}", self.rfb_port),
             "view-only=true".into(),
             "shared=true".into(),
-            "incremental=true".into(),
+            // Request a complete RFB frame each cycle. With incremental
+            // updates a quiet VM emits no buffers, so a receiver joining
+            // between sparse damage events can wait minutes for the next IDR
+            // and remain blank despite a healthy UDP socket.
+            "incremental=false".into(),
             "do-timestamp=true".into(),
             "!".into(),
             "videoconvert".into(),
@@ -150,6 +155,17 @@ pub struct IsochroneRtpStream {
     pub sample_rate_hz: u32,
     pub channels: u16,
     pub frames_per_packet: u32,
+    pub observed_at_unix_ms: u64,
+    pub valid_until_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IsochroneClockMeasurement {
+    pub anchor_rtp_timestamp: u32,
+    pub anchor_unix_ns: u64,
+    pub rate_adjustment_ppb: i64,
+    pub uncertainty_ns: u64,
+    pub quality: ClockQuality,
     pub observed_at_unix_ms: u64,
     pub valid_until_unix_ms: u64,
 }
@@ -251,6 +267,32 @@ impl IsochroneRtpStream {
             descriptor,
             endpoints,
         })
+    }
+
+    /// Project a measurement calculated by Isochrone into the shared clock
+    /// contract. This does not derive drift from playout fill or control ASRC.
+    pub fn clock_correlation(
+        &self,
+        measurement: IsochroneClockMeasurement,
+    ) -> Result<ClockCorrelationV1, ContractError> {
+        let correlation = ClockCorrelationV1 {
+            schema_version: 1,
+            mapping_id: format!("isochrone/{}/clock", self.stream_id),
+            source_clock_id: format!("rtp/{}", self.stream_id),
+            source_generation: self.generation.clone(),
+            source_rate_hz: u64::from(self.sample_rate_hz),
+            source_timestamp_bits: 32,
+            anchor_source_ticks: u64::from(measurement.anchor_rtp_timestamp),
+            anchor_unix_ns: measurement.anchor_unix_ns,
+            rate_adjustment_ppb: measurement.rate_adjustment_ppb,
+            uncertainty_ns: measurement.uncertainty_ns,
+            synchronization_method: ClockSynchronizationMethod::Measured,
+            quality: measurement.quality,
+            observed_at_unix_ms: measurement.observed_at_unix_ms,
+            valid_until_unix_ms: measurement.valid_until_unix_ms,
+        };
+        correlation.validate().map_err(ContractError)?;
+        Ok(correlation)
     }
 }
 
@@ -1062,6 +1104,7 @@ mod tests {
             bitrate_kbps: 8_000,
         };
         let args = runtime.gstreamer_args().unwrap();
+        assert!(args.iter().any(|arg| arg == "incremental=false"));
         assert_eq!(
             args.iter()
                 .filter(|arg| arg.as_str() == "nvh264enc")
@@ -1074,7 +1117,7 @@ mod tests {
 
     #[test]
     fn isochrone_projects_rtp_shape_without_reimplementing_audio() {
-        let projection = IsochroneRtpStream {
+        let stream = IsochroneRtpStream {
             stream_id: "audio/studio/program".into(),
             source_resource: "audio-device/scarlett-18i20".into(),
             zone: "studio".into(),
@@ -1087,13 +1130,25 @@ mod tests {
             frames_per_packet: 48,
             observed_at_unix_ms: 1_000,
             valid_until_unix_ms: 31_000,
-        }
-        .project_v2()
-        .unwrap();
+        };
+        let projection = stream.project_v2().unwrap();
         assert_eq!(projection.descriptor.encoding.unwrap().kind, "l24");
         assert_eq!(projection.descriptor.clock.unwrap().kind, ClockKind::Rtp);
         assert_eq!(projection.endpoints.bindings[0].profile, "isochrone-rtp-v1");
         let wire = serde_json::to_string(&projection.endpoints).unwrap();
         assert!(!wire.contains("192.168."));
+        let clock = stream
+            .clock_correlation(IsochroneClockMeasurement {
+                anchor_rtp_timestamp: u32::MAX - 24,
+                anchor_unix_ns: 10_000_000_000,
+                rate_adjustment_ppb: 12_000,
+                uncertainty_ns: 250_000,
+                quality: ClockQuality::Synchronized,
+                observed_at_unix_ms: 1_000,
+                valid_until_unix_ms: 31_000,
+            })
+            .unwrap();
+        assert_eq!(clock.source_rate_hz, 48_000);
+        assert_eq!(clock.source_generation, "route-7");
     }
 }
