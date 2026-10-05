@@ -14,6 +14,8 @@ use unibus_media::{
 #[serde(deny_unknown_fields)]
 struct Config {
     bus: ClientConfig,
+    #[serde(default)]
+    backend: CaptureBackend,
     #[serde(default = "default_gst")]
     gst_launch: PathBuf,
     #[serde(default = "default_device")]
@@ -28,6 +30,43 @@ struct Config {
     chunk_ms: u32,
     #[serde(default = "default_destination")]
     destination: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CaptureBackend {
+    #[default]
+    Alsa,
+    Pipewire,
+    Jack,
+    Coreaudio,
+}
+
+impl CaptureBackend {
+    fn source_arguments(&self, reference: &str) -> Result<Vec<String>> {
+        ensure!(
+            !reference.trim().is_empty()
+                && reference.len() <= 512
+                && !reference.chars().any(char::is_control),
+            "invalid capture reference"
+        );
+        Ok(match self {
+            Self::Alsa => vec!["alsasrc".into(), format!("device={reference}")],
+            Self::Pipewire => vec!["pipewiresrc".into(), format!("path={reference}")],
+            Self::Jack => vec![
+                "jackaudiosrc".into(),
+                "connect=explicit".into(),
+                format!("port-names={reference}"),
+            ],
+            Self::Coreaudio => {
+                let device = reference
+                    .parse::<i32>()
+                    .context("CoreAudio capture_device must be a numeric AudioDeviceID")?;
+                ensure!(device >= 0, "CoreAudio device ID must be nonnegative");
+                vec!["osxaudiosrc".into(), format!("device={device}")]
+            }
+        })
+    }
 }
 
 fn default_gst() -> PathBuf {
@@ -89,13 +128,15 @@ fn main() -> Result<()> {
     ensure!(frames > 0, "chunk duration produced no samples");
     let chunk_bytes = frames as usize * config.channels as usize * 2;
 
+    let source = config.backend.source_arguments(&config.capture_device)?;
     let mut child = Command::new(&config.gst_launch)
+        .arg("-q")
+        .args(source)
         .args([
-            "-q",
-            "alsasrc",
-            &format!("device={}", config.capture_device),
             "!",
             "audioconvert",
+            "!",
+            "audioresample",
             "!",
             &format!(
                 "audio/x-raw,format=S16LE,rate={},channels={},layout=interleaved",
@@ -143,3 +184,24 @@ fn main() -> Result<()> {
 
 #[allow(dead_code)]
 fn _path_is_explicit(_: &Path) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_selection_preserves_explicit_application_ports() {
+        let source = CaptureBackend::Jack
+            .source_arguments("surge:left,surge:right")
+            .unwrap();
+        assert!(source.contains(&"connect=explicit".into()));
+        assert!(source.contains(&"port-names=surge:left,surge:right".into()));
+        assert!(
+            CaptureBackend::Coreaudio
+                .source_arguments("BlackHole")
+                .is_err()
+        );
+        assert!(CaptureBackend::Coreaudio.source_arguments("-1").is_err());
+        assert!(CaptureBackend::Pipewire.source_arguments("").is_err());
+    }
+}
