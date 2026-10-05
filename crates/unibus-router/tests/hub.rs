@@ -12,7 +12,7 @@ use unibus::framing::{read_frame, write_frame};
 use unibus::kinds::{self, Control};
 use unibus::{
     AuthError, NodeClaims, OfflineVerifier, STREAM_EVENT_KIND, STREAM_INTEREST_KIND,
-    STREAM_INTEREST_RELEASE_KIND,
+    STREAM_INTEREST_RELEASE_KIND, STREAM_SOURCE_CAPABILITY,
 };
 use unibus_router::{
     Hub, HubConfig, StreamRouter,
@@ -43,7 +43,7 @@ fn hub_config(dir: &std::path::Path, extra_routes: &str) -> HubConfig {
             {{"producer_id": "brain", "token_file": "token", "zones": ["default", "living-room"], "capabilities": ["display", "audio_output", "presence_capture", "canvas.command"], "publishes": ["canvas_command", "audio_playback_chunk", "test.publish", "fr_response", "mute_request", "totally_unknown_kind"], "publish_zones": ["default", "living-room", "nowhere"], "publish_screen_anchors": ["screen-tv", "screen-left"], "publish_producers": ["tv", "ghost"]}},
             {{"producer_id": "tv", "token_file": "token", "zones": ["living-room"], "capabilities": ["display"], "screen_anchors": ["screen-tv"], "publishes": ["unibus.stream.interest.v1", "unibus.stream.interest.release.v1"]}},
             {{"producer_id": "studio", "token_file": "token", "zones": ["default"], "capabilities": ["display"], "screen_anchors": ["screen-left"], "publishes": ["test.publish"], "publish_zones": ["default"]}},
-            {{"producer_id": "speaker", "token_file": "token", "zones": ["living-room"], "capabilities": ["audio_output"], "publishes": ["unibus.stream.event.v1"]}}
+            {{"producer_id": "speaker", "token_file": "token", "zones": ["living-room"], "capabilities": ["audio_output", "unibus.stream.source"], "publishes": ["unibus.stream.event.v1"]}}
         ]
     }}"#
     );
@@ -684,7 +684,7 @@ fn broadcast_plugin_reaches_every_other_node() {
 fn stream_router_delivers_only_after_a_bounded_interest() {
     let hub = TestHub::with("", vec![Arc::new(StreamRouter::default())]);
     let mut consumer = hub.node("tv", &["display"], &["screen-tv"]);
-    let mut producer = hub.node("speaker", &["audio_output"], &[]);
+    let mut producer = hub.node("speaker", &["audio_output", STREAM_SOURCE_CAPABILITY], &[]);
     let now = unibus::envelope::now_ms();
     consumer
         .send(
@@ -702,6 +702,13 @@ fn stream_router_delivers_only_after_a_bounded_interest() {
         )
         .unwrap();
     assert_eq!(consumer.recv_reply().message.body["success"], json!(true));
+    assert_eq!(
+        producer
+            .recv_until(STREAM_INTEREST_KIND)
+            .destination
+            .as_deref(),
+        Some("speaker")
+    );
 
     producer
         .send(
@@ -735,6 +742,13 @@ fn stream_router_delivers_only_after_a_bounded_interest() {
         )
         .unwrap();
     assert_eq!(consumer.recv_reply().message.body["success"], json!(true));
+    assert_eq!(
+        producer
+            .recv_until(STREAM_INTEREST_RELEASE_KIND)
+            .destination
+            .as_deref(),
+        Some("speaker")
+    );
     producer
         .send(
             Message::new(

@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 pub const STREAM_INTEREST_KIND: &str = "unibus.stream.interest.v1";
 pub const STREAM_INTEREST_RELEASE_KIND: &str = "unibus.stream.interest.release.v1";
 pub const STREAM_EVENT_KIND: &str = "unibus.stream.event.v1";
+/// Capability held by producers that can suspend work based on stream leases.
+pub const STREAM_SOURCE_CAPABILITY: &str = "unibus.stream.source";
 
 const MAX_STREAMS_PER_INTEREST: usize = 128;
 const MAX_STREAM_LEASE_MS: u64 = 5 * 60 * 1_000;

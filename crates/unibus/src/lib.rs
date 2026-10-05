@@ -50,6 +50,7 @@ pub use qos::Qos;
 pub use reconnect::{ReconnectBackoff, ReconnectPolicy};
 pub use service_adoption::{AdoptionPolicy, AdoptionState, AdoptionStatus};
 pub use stream::{
-    STREAM_EVENT_KIND, STREAM_INTEREST_KIND, STREAM_INTEREST_RELEASE_KIND, StreamDirection,
-    StreamEvent, StreamImportance, StreamInterest, StreamInterestRelease, StreamRequirement,
+    STREAM_EVENT_KIND, STREAM_INTEREST_KIND, STREAM_INTEREST_RELEASE_KIND,
+    STREAM_SOURCE_CAPABILITY, StreamDirection, StreamEvent, StreamImportance, StreamInterest,
+    StreamInterestRelease, StreamRequirement,
 };

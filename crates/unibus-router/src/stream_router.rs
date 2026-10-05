@@ -5,8 +5,8 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result, ensure};
 use unibus::{
-    Envelope, STREAM_EVENT_KIND, STREAM_INTEREST_KIND, STREAM_INTEREST_RELEASE_KIND, StreamEvent,
-    StreamInterest, StreamInterestRelease, envelope,
+    Envelope, STREAM_EVENT_KIND, STREAM_INTEREST_KIND, STREAM_INTEREST_RELEASE_KIND,
+    STREAM_SOURCE_CAPABILITY, StreamEvent, StreamInterest, StreamInterestRelease, envelope,
 };
 
 use crate::plugin::{HubHandle, HubPlugin};
@@ -43,6 +43,7 @@ impl HubPlugin for StreamRouter {
                     .lock()
                     .map_err(|_| anyhow::anyhow!("stream interest mutex poisoned"))?
                     .insert(interest.lease_id.clone(), interest);
+                hub.send_to_holders(STREAM_SOURCE_CAPABILITY, source, envelope, payload);
                 Ok(true)
             }
             STREAM_INTEREST_RELEASE_KIND => {
@@ -69,6 +70,8 @@ impl HubPlugin for StreamRouter {
                 {
                     interests.remove(&release.lease_id);
                 }
+                drop(interests);
+                hub.send_to_holders(STREAM_SOURCE_CAPABILITY, source, envelope, payload);
                 Ok(true)
             }
             STREAM_EVENT_KIND => {
