@@ -53,6 +53,8 @@ impl Qos {
             | "content.index"
             | "content.index_snapshot"
             | "canvas.workspace_state.v1"
+            | "unibus.adapter.catalog.v1"
+            | "unibus.adapter.status.v1"
             | "media.video_stream.v1" => Self::Snapshot,
             _ => Self::Command,
         }

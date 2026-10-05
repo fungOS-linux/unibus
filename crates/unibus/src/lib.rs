@@ -10,6 +10,7 @@
 //! (`jarvis-core::edge_transport`), which this contract is being lifted from;
 //! v2 generalizes capability/message namespacing without breaking v1 frames.
 
+pub mod adapter;
 pub mod auth;
 pub mod client;
 pub mod direct;
@@ -22,6 +23,10 @@ pub mod peer;
 pub mod qos;
 pub mod reconnect;
 
+pub use adapter::{
+    ADAPTER_CATALOG_KIND, ADAPTER_INTEREST_KIND, ADAPTER_STATUS_KIND, AdapterCatalog,
+    AdapterDescriptor, AdapterInterest, AdapterState, AdapterStatus,
+};
 pub use auth::{AuthError, NodeClaims, OfflineVerifier};
 pub use direct::{DirectSessionClaims, DirectSessionError, DirectSessionVerifier, PeerBinding};
 pub use discovery::{
