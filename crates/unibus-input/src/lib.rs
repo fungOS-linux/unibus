@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+pub mod desktop;
 
 pub const GAMEPAD_STATE_CONTRACT: &str = "input.gamepad_state";
 pub const DESKTOP_STATE_CONTRACT: &str = "input.desktop_state.v1";

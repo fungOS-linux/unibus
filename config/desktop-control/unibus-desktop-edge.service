@@ -1,0 +1,16 @@
+[Unit]
+Description=Authorized Neo keyboard and pointer for TV Canvas
+After=unibus-desktop-router.service canvas-compositor.service
+Requires=unibus-desktop-router.service
+[Service]
+User=ajm
+WorkingDirectory=/home/ajm/.config/unibus/desktop-control
+ExecStart=/usr/local/bin/unibus-desktop-edge /home/ajm/.config/unibus/desktop-control/edge.json
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+[Install]
+WantedBy=multi-user.target

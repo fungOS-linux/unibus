@@ -1,0 +1,15 @@
+[Unit]
+Description=Private paired Unibus desktop-input channel
+After=network.target
+[Service]
+User=ajm
+WorkingDirectory=/home/ajm/.config/unibus/desktop-control
+ExecStart=/usr/local/bin/unibus-router /home/ajm/.config/unibus/desktop-control/router.json
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+[Install]
+WantedBy=multi-user.target

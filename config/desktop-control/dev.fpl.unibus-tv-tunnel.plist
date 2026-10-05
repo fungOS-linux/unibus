@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>dev.fpl.unibus-tv-tunnel</string>
+<key>ProgramArguments</key><array>
+<string>/Users/ajmwagar/Applications/Unibus TV Control.app/Contents/Helpers/unibus-desktop-tunnel</string>
+<string>linux-home-pi</string><string>18796</string><string>18797</string><string>ajm</string>
+</array>
+<key>EnvironmentVariables</key><dict><key>PATH</key><string>/Users/ajmwagar/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><true/>
+<key>ThrottleInterval</key><integer>10</integer>
+<key>StandardOutPath</key><string>/Users/ajmwagar/Library/Application Support/Unibus TV Control/tunnel.log</string>
+<key>StandardErrorPath</key><string>/Users/ajmwagar/Library/Application Support/Unibus TV Control/tunnel.log</string>
+</dict></plist>
