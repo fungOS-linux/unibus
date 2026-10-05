@@ -61,6 +61,17 @@ fn main() -> Result<()> {
         );
         ensure!(routes.len() <= 256, "route catalog exceeds bound");
         let now = unibus::envelope::now_ms();
+        let mut node_status = bus.envelope(
+            Some(&config.destination),
+            Message::new("media.audio.isochrone.status.v1", serde_json::json!({
+                "node_id": node_id,
+                "route_count": routes.len(),
+                "observed_at_unix_ms": now,
+                "valid_until_unix_ms": now + 3000,
+            })),
+        )?;
+        node_status.ttl_ms = Some(3000);
+        bus.send(&node_status, &[])?;
         for route in routes {
             ensure!(
                 !route.route_id.is_empty()
