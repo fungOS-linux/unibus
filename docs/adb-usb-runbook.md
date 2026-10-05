@@ -136,3 +136,9 @@ and expiry, exact discovery metadata/TTL, and an actual hub with both bridge
 processes transferring 4 MiB while rejecting an unapproved client. Full dependency
 clippy currently finds an existing `collapsible_match` in the shared router;
 adapter-only strict clippy is clean.
+
+The Oct 5 verification used the existing working tree. Independently of this
+adapter, the tracked workspace already references an untracked `unibus-fix`
+crate, and `unibus` exports an untracked `service_adoption.rs` module. Those
+pre-existing unfinished sources were preserved, not swept into the ADB commits;
+a clean clone cannot build until their owning work is completed.
