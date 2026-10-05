@@ -13,6 +13,8 @@ pub const ENDPOINT_ANNOUNCEMENT_KIND: &str = "stream.endpoints.v1";
 pub const SCHEMA_VERSION: u32 = 1;
 pub const STREAM_DESCRIPTOR_V2_KIND: &str = "stream.descriptor.v2";
 pub const ENDPOINT_ANNOUNCEMENT_V2_KIND: &str = "stream.endpoints.v2";
+pub const OBSERVATION_STREAM_V2_KIND: &str = "stream.observation.stream.v2";
+pub const OBSERVATION_SNAPSHOT_V2_KIND: &str = "stream.observation.snapshot.v2";
 pub const V2_SCHEMA_VERSION: u32 = 2;
 
 const MAXIMUM_AGE_MS: u64 = 24 * 60 * 60 * 1_000;
@@ -316,6 +318,40 @@ pub struct EndpointAnnouncementV2 {
     pub provenance: ProvenanceFacet,
 }
 
+/// One typed observation emitted under a validated descriptor. Values contain
+/// no dynamic labels; bounded identity dimensions live in the descriptor.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationSampleV2 {
+    pub schema_version: u32,
+    pub stream_id: String,
+    pub sequence: u64,
+    pub observed_at_unix_ms: u64,
+    pub values: BTreeMap<String, ObservationDatum>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "shape", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ObservationDatum {
+    Scalar {
+        value: f64,
+    },
+    Vector {
+        values: Vec<f64>,
+    },
+    Histogram {
+        bucket_counts: Vec<u64>,
+        count: u64,
+        sum: f64,
+    },
+    State {
+        value: String,
+    },
+    Event {
+        event_type: String,
+    },
+}
+
 impl StreamDescriptorV2 {
     pub fn validate(&self) -> Result<(), String> {
         version_v2(self.schema_version)?;
@@ -380,6 +416,113 @@ impl StreamDescriptorV2 {
         )?;
         self.provenance.validate()?;
         Ok(())
+    }
+
+    /// Exact L1 kind implied by the descriptor delivery contract.
+    pub fn observation_message_kind(&self) -> Result<&'static str, String> {
+        if self.observation.is_none() {
+            return Err("descriptor has no observation facet".into());
+        }
+        match self.delivery.class {
+            DeliveryClass::Stream => Ok(OBSERVATION_STREAM_V2_KIND),
+            DeliveryClass::Snapshot => Ok(OBSERVATION_SNAPSHOT_V2_KIND),
+            DeliveryClass::Command => Err("observations cannot use command delivery".into()),
+        }
+    }
+
+    /// Descriptor-driven scalar selection for metrics/storage adapters.
+    pub fn scalar_observations(&self) -> impl Iterator<Item = &ObservationValue> {
+        self.observation
+            .iter()
+            .flat_map(|facet| facet.values.iter())
+            .filter(|value| matches!(value.value, ObservationValueKind::Scalar { .. }))
+    }
+}
+
+impl ObservationSampleV2 {
+    pub fn validate_against(
+        &self,
+        descriptor: &StreamDescriptorV2,
+        now_unix_ms: u64,
+    ) -> Result<(), String> {
+        version_v2(self.schema_version)?;
+        descriptor.validate()?;
+        if self.stream_id != descriptor.stream_id {
+            return Err("observation sample stream_id does not match descriptor".into());
+        }
+        if self.sequence == 0 || self.observed_at_unix_ms == 0 {
+            return Err("observation sample sequence and timestamp must be non-zero".into());
+        }
+        let observation = descriptor
+            .observation
+            .as_ref()
+            .ok_or_else(|| "descriptor has no observation facet".to_string())?;
+        if now_unix_ms < self.observed_at_unix_ms
+            || now_unix_ms - self.observed_at_unix_ms > observation.maximum_age_ms
+        {
+            return Err("observation sample is future-dated or stale".into());
+        }
+        if self.values.is_empty() || self.values.len() > observation.values.len() {
+            return Err("observation sample has an invalid value count".into());
+        }
+        for (name, datum) in &self.values {
+            let declared = observation
+                .values
+                .iter()
+                .find(|value| value.name == *name)
+                .ok_or_else(|| format!("observation sample value {name} is undeclared"))?;
+            datum.validate_against(&declared.value)?;
+        }
+        Ok(())
+    }
+}
+
+impl ObservationDatum {
+    fn validate_against(&self, declared: &ObservationValueKind) -> Result<(), String> {
+        match (self, declared) {
+            (Self::Scalar { value }, ObservationValueKind::Scalar { .. }) => finite(*value),
+            (
+                Self::Vector { values },
+                ObservationValueKind::Vector {
+                    maximum_elements, ..
+                },
+            ) => {
+                if values.is_empty()
+                    || values.len() > *maximum_elements as usize
+                    || values.iter().any(|value| !value.is_finite())
+                {
+                    return Err("observation vector is empty, non-finite, or over bound".into());
+                }
+                Ok(())
+            }
+            (
+                Self::Histogram {
+                    bucket_counts,
+                    count,
+                    sum,
+                },
+                ObservationValueKind::Histogram { boundaries, .. },
+            ) => {
+                if !sum.is_finite()
+                    || bucket_counts.len() != boundaries.len() + 1
+                    || bucket_counts.iter().sum::<u64>() != *count
+                {
+                    return Err("observation histogram geometry or count is invalid".into());
+                }
+                Ok(())
+            }
+            (Self::State { value }, ObservationValueKind::State { states }) => states
+                .contains(value)
+                .then_some(())
+                .ok_or_else(|| "observation state is not declared".into()),
+            (Self::Event { event_type }, ObservationValueKind::Event { event_types }) => {
+                event_types
+                    .contains(event_type)
+                    .then_some(())
+                    .ok_or_else(|| "observation event type is not declared".into())
+            }
+            _ => Err("observation sample shape does not match descriptor".into()),
+        }
     }
 }
 
@@ -691,6 +834,13 @@ fn duration(name: &str, value: u64) -> Result<(), String> {
     (value > 0 && value <= MAXIMUM_AGE_MS)
         .then_some(())
         .ok_or_else(|| format!("{name} must be in 1..={MAXIMUM_AGE_MS}"))
+}
+
+fn finite(value: f64) -> Result<(), String> {
+    value
+        .is_finite()
+        .then_some(())
+        .ok_or_else(|| "observation scalar must be finite".into())
 }
 
 fn bounded_map(

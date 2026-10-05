@@ -46,6 +46,9 @@ impl Qos {
             | "input.gamepad_state"
             | "input.desktop_state.v1"
             | "rlcd.decision.v1"
+            | "rf.csi.frame.v1"
+            | "rf.csi.features.v1"
+            | "stream.observation.stream.v2"
             | "sensor.sample" => Self::Stream,
             "presence.snapshot"
             | "presence.update"
@@ -55,7 +58,10 @@ impl Qos {
             | "canvas.workspace_state.v1"
             | "unibus.adapter.catalog.v1"
             | "unibus.adapter.status.v1"
-            | "media.video_stream.v1" => Self::Snapshot,
+            | "media.video_stream.v1"
+            | "spatial.presence.v1"
+            | "spatial.vitals.v1"
+            | "stream.observation.snapshot.v2" => Self::Snapshot,
             _ => Self::Command,
         }
     }
@@ -89,6 +95,23 @@ mod tests {
     #[test]
     fn sensor_samples_stream() {
         assert_eq!(Qos::of_kind("sensor.sample"), Qos::Stream);
+    }
+
+    #[test]
+    fn csi_contracts_use_latency_first_and_latest_value_delivery() {
+        assert_eq!(Qos::of_kind("rf.csi.frame.v1"), Qos::Stream);
+        assert_eq!(Qos::of_kind("rf.csi.features.v1"), Qos::Stream);
+        assert_eq!(Qos::of_kind("spatial.presence.v1"), Qos::Snapshot);
+        assert_eq!(Qos::of_kind("spatial.vitals.v1"), Qos::Snapshot);
+    }
+
+    #[test]
+    fn typed_observation_kinds_have_explicit_delivery_classes() {
+        assert_eq!(Qos::of_kind("stream.observation.stream.v2"), Qos::Stream);
+        assert_eq!(
+            Qos::of_kind("stream.observation.snapshot.v2"),
+            Qos::Snapshot
+        );
     }
 
     #[test]

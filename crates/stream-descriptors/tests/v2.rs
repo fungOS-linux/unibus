@@ -1,4 +1,9 @@
-use stream_descriptors::{EndpointAnnouncementV2, StreamDescriptorV2};
+use std::collections::BTreeMap;
+
+use stream_descriptors::{
+    EndpointAnnouncementV2, OBSERVATION_SNAPSHOT_V2_KIND, ObservationDatum, ObservationSampleV2,
+    StreamDescriptorV2,
+};
 
 fn assert_descriptor_golden(source: &str) -> StreamDescriptorV2 {
     let expected: serde_json::Value = serde_json::from_str(source).unwrap();
@@ -79,6 +84,73 @@ fn unknown_observation_fields_fail_closed() {
         serde_json::from_str(include_str!("fixtures/radioman-spectrum-v2.json")).unwrap();
     value["observation"]["values"][0]["pipeline"] = serde_json::json!("shell");
     assert!(serde_json::from_value::<StreamDescriptorV2>(value).is_err());
+}
+
+#[test]
+fn environmental_sample_validates_without_producer_specific_parsing() {
+    let descriptor: StreamDescriptorV2 =
+        serde_json::from_str(include_str!("fixtures/environment-v2.json")).unwrap();
+    assert_eq!(
+        descriptor.observation_message_kind().unwrap(),
+        OBSERVATION_SNAPSHOT_V2_KIND
+    );
+    assert_eq!(descriptor.scalar_observations().count(), 2);
+
+    let sample = ObservationSampleV2 {
+        schema_version: 2,
+        stream_id: descriptor.stream_id.clone(),
+        sequence: 7,
+        observed_at_unix_ms: 1_000,
+        values: BTreeMap::from([
+            (
+                "temperature".into(),
+                ObservationDatum::Scalar { value: 21.5 },
+            ),
+            (
+                "relative_humidity".into(),
+                ObservationDatum::Scalar { value: 44.0 },
+            ),
+        ]),
+    };
+    sample.validate_against(&descriptor, 1_100).unwrap();
+
+    let mut undeclared = sample.clone();
+    undeclared.values.insert(
+        "room_name".into(),
+        ObservationDatum::State {
+            value: "office".into(),
+        },
+    );
+    assert!(undeclared.validate_against(&descriptor, 1_100).is_err());
+    assert!(sample.validate_against(&descriptor, 100_001).is_err());
+}
+
+#[test]
+fn csi_sample_enforces_vector_bound_and_finite_values() {
+    let descriptor: StreamDescriptorV2 =
+        serde_json::from_str(include_str!("fixtures/esp32-csi-features-v2.json")).unwrap();
+    let sample = ObservationSampleV2 {
+        schema_version: 2,
+        stream_id: descriptor.stream_id.clone(),
+        sequence: 1,
+        observed_at_unix_ms: 1_000,
+        values: BTreeMap::from([(
+            "amplitude".into(),
+            ObservationDatum::Vector {
+                values: vec![-31.0, -29.5, -30.25],
+            },
+        )]),
+    };
+    sample.validate_against(&descriptor, 1_050).unwrap();
+
+    let mut invalid = sample;
+    invalid.values.insert(
+        "amplitude".into(),
+        ObservationDatum::Vector {
+            values: vec![f64::NAN],
+        },
+    );
+    assert!(invalid.validate_against(&descriptor, 1_050).is_err());
 }
 
 #[test]
