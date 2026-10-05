@@ -1,0 +1,60 @@
+{
+  "schema_version": 2,
+  "stream_id": "rf/esp32-hall/csi-features",
+  "source_resource": "device/esp32-hall",
+  "semantic": {
+    "kind": "rf.csi.features",
+    "dimensions": {
+      "zone": "hall"
+    }
+  },
+  "payload": {
+    "contract": "rf.csi.features.v1",
+    "maximum_bytes": 8192
+  },
+  "observation": {
+    "values": [
+      {
+        "name": "amplitude",
+        "quantity": "rf_amplitude",
+        "unit": "dB",
+        "value": {
+          "shape": "vector",
+          "maximum_elements": 512,
+          "metric": "gauge",
+          "aggregations": ["last", "minimum", "maximum", "mean"]
+        }
+      },
+      {
+        "name": "frames_dropped",
+        "quantity": "frames",
+        "unit": "{frame}",
+        "value": {
+          "shape": "scalar",
+          "metric": "monotonic_counter",
+          "aggregations": ["last", "rate"]
+        }
+      }
+    ],
+    "expected_cadence_ms": 50,
+    "maximum_age_ms": 250
+  },
+  "encoding": {
+    "kind": "csi-features-f32-le"
+  },
+  "clock": {
+    "kind": "producer_sequence",
+    "timestamp_bits": 32
+  },
+  "delivery": {
+    "class": "stream",
+    "maximum_age_ms": 250,
+    "coalescing": "stream_id"
+  },
+  "required_consumer_capabilities": ["rf.csi.features.consume"],
+  "provenance": {
+    "producer": "esp32-hall",
+    "algorithm": "csi/top-k-v1",
+    "transform": "phase-unwrap/welford"
+  }
+}

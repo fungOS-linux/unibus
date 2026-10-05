@@ -1,0 +1,51 @@
+{
+  "schema_version": 2,
+  "stream_id": "sensor/rm4-office/environment",
+  "source_resource": "device/rm4-office",
+  "semantic": {
+    "kind": "environment.observation",
+    "dimensions": {
+      "zone": "office"
+    }
+  },
+  "observation": {
+    "values": [
+      {
+        "name": "temperature",
+        "quantity": "thermodynamic_temperature",
+        "unit": "Cel",
+        "value": {
+          "shape": "scalar",
+          "metric": "gauge",
+          "aggregations": ["last", "minimum", "maximum", "mean"]
+        }
+      },
+      {
+        "name": "relative_humidity",
+        "quantity": "relative_humidity",
+        "unit": "%",
+        "value": {
+          "shape": "scalar",
+          "metric": "gauge",
+          "aggregations": ["last", "minimum", "maximum", "mean"]
+        }
+      }
+    ],
+    "expected_cadence_ms": 30000,
+    "maximum_age_ms": 90000
+  },
+  "clock": {
+    "kind": "wall_clock",
+    "synchronization": "ntp"
+  },
+  "delivery": {
+    "class": "snapshot",
+    "maximum_age_ms": 90000,
+    "coalescing": "stream_id"
+  },
+  "required_consumer_capabilities": ["sensor.environment.consume"],
+  "provenance": {
+    "producer": "broadlink/rm4-office",
+    "calibration": "factory"
+  }
+}

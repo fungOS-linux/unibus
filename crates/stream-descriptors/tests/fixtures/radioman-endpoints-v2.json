@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "stream_id": "radio/rtl-sdr-1/spectrum",
+  "generation": "boot-72",
+  "bindings": [
+    {
+      "transport": "unibus",
+      "profile": "envelope-v1",
+      "role": "connectionless",
+      "endpoint_reference": "radioman/spectrum",
+      "requires": "rf.spectrum.consume"
+    }
+  ],
+  "observed_at_unix_ms": 1000,
+  "valid_until_unix_ms": 31000,
+  "provenance": {
+    "producer": "radioman"
+  }
+}

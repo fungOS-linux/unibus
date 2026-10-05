@@ -1,0 +1,60 @@
+{
+  "schema_version": 2,
+  "stream_id": "radio/rtl-sdr-1/spectrum",
+  "source_resource": "radio/rtl-sdr-1",
+  "semantic": {
+    "kind": "rf.spectrum",
+    "dimensions": {
+      "receiver": "rtl-sdr-1",
+      "site": "wagar-house"
+    }
+  },
+  "payload": {
+    "contract": "radioman.spectrum.v1",
+    "maximum_bytes": 32768
+  },
+  "observation": {
+    "values": [
+      {
+        "name": "bins",
+        "quantity": "rf_power",
+        "unit": "dBFS",
+        "value": {
+          "shape": "vector",
+          "maximum_elements": 4096,
+          "metric": "gauge",
+          "aggregations": ["last", "maximum", "mean"]
+        }
+      },
+      {
+        "name": "frames_dropped",
+        "quantity": "frames",
+        "unit": "{frame}",
+        "value": {
+          "shape": "scalar",
+          "metric": "monotonic_counter",
+          "aggregations": ["last", "rate"]
+        }
+      }
+    ],
+    "expected_cadence_ms": 33,
+    "maximum_age_ms": 500
+  },
+  "encoding": {
+    "kind": "json-f32-dbfs"
+  },
+  "clock": {
+    "kind": "wall_clock",
+    "synchronization": "ntp"
+  },
+  "delivery": {
+    "class": "stream",
+    "maximum_age_ms": 500,
+    "coalescing": "stream_id"
+  },
+  "required_consumer_capabilities": ["rf.spectrum.consume"],
+  "provenance": {
+    "producer": "radioman",
+    "transform": "fft/window-hann"
+  }
+}

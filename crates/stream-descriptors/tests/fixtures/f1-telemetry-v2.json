@@ -1,0 +1,87 @@
+{
+  "schema_version": 2,
+  "stream_id": "sim/iracing/car-7/telemetry",
+  "source_resource": "sim/iracing/car-7",
+  "semantic": {
+    "kind": "motorsport.car.telemetry",
+    "dimensions": {
+      "car": "7",
+      "series": "formula"
+    }
+  },
+  "payload": {
+    "contract": "motorsport.telemetry.frame.v1",
+    "maximum_bytes": 65536
+  },
+  "observation": {
+    "values": [
+      {
+        "name": "speed",
+        "quantity": "speed",
+        "unit": "km/h",
+        "value": {
+          "shape": "scalar",
+          "metric": "gauge",
+          "aggregations": ["last", "maximum", "mean"]
+        }
+      },
+      {
+        "name": "tyre_temperature",
+        "quantity": "thermodynamic_temperature",
+        "unit": "Cel",
+        "value": {
+          "shape": "vector",
+          "maximum_elements": 4,
+          "metric": "gauge",
+          "aggregations": ["last", "minimum", "maximum", "mean"]
+        }
+      },
+      {
+        "name": "lap_delta_distribution",
+        "quantity": "time",
+        "unit": "s",
+        "value": {
+          "shape": "histogram",
+          "metric": "distribution",
+          "boundaries": [-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0]
+        }
+      },
+      {
+        "name": "session_phase",
+        "quantity": "race_session_phase",
+        "value": {
+          "shape": "state",
+          "states": ["garage", "formation", "green", "yellow", "finished"]
+        }
+      },
+      {
+        "name": "race_control",
+        "quantity": "race_control_event",
+        "value": {
+          "shape": "event",
+          "event_types": ["flag_changed", "penalty", "pit_window", "incident"]
+        }
+      }
+    ],
+    "dimensions": {
+      "driver": "player"
+    },
+    "expected_cadence_ms": 16,
+    "maximum_age_ms": 250
+  },
+  "clock": {
+    "kind": "monotonic",
+    "rate_hz": 1000000,
+    "timestamp_bits": 64,
+    "synchronization": "session-start"
+  },
+  "delivery": {
+    "class": "stream",
+    "maximum_age_ms": 250
+  },
+  "required_consumer_capabilities": ["motorsport.telemetry.consume"],
+  "provenance": {
+    "producer": "iracing-adapter",
+    "transform": "native-sdk/frame-v1"
+  }
+}
