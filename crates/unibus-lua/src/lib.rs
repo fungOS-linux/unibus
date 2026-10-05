@@ -1,5 +1,5 @@
 //! Install into a host-owned VM; no network-thread Lua callbacks.
-//! LuaJIT is the default backend; select Luau explicitly for existing Canvas hosts.
+//! Luau is the default backend; VR hosts can opt into LuaJIT explicitly.
 use mlua::{Lua, LuaSerdeExt, UserData, UserDataMethods, Value};
 use unibus_sdk::{Publish, Session};
 

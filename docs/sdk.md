@@ -1,7 +1,7 @@
 # Embedded Unibus SDK v1
 
 `unibus-sdk` owns a shared Rust control-plane session. `unibus-lua` embeds it
-directly through mlua (LuaJIT by default); `unibus-ffi` exposes
+directly through mlua (Luau by default); `unibus-ffi` exposes
 the same implementation through a C ABI. There is no extra daemon or protocol.
 
 ## Contract
@@ -37,17 +37,17 @@ token-source selection. Router grants must still limit that session's authority.
 ## Lua host
 
 Call `unibus_lua::install(&lua)` in your Rust host. The default backend is
-vendored LuaJIT: no system Lua installation is required. Select exactly one
-backend across the host's dependency graph. Existing Canvas hosts still use
-Luau and must select `default-features = false, features = ["luau"]`.
+vendored Luau, matching Canvas. LuaJIT is opt-in for VR hosts only:
+`default-features = false, features = ["luajit"]`. No system Lua installation
+is required. Select exactly one backend across the host's dependency graph.
 Lua 5.4 hosts select `default-features = false, features = ["lua54"]`.
 
 ```toml
-# Standalone LuaJIT host (default)
+# Canvas/Luau host (default)
 unibus-lua = { path = "../unibus/crates/unibus-lua" }
 
-# Existing Canvas/Luau host: use this instead, not both.
-# unibus-lua = { path = "../unibus/crates/unibus-lua", default-features = false, features = ["luau"] }
+# VR/LuaJIT host: use this instead, not both.
+# unibus-lua = { path = "../unibus/crates/unibus-lua", default-features = false, features = ["luajit"] }
 ```
 
 The publish/poll/status contract is identical on all backends. LuaJIT is not
@@ -90,11 +90,11 @@ C errors rather than leaking credential-bearing transport diagnostics.
 
 `cargo test -p unibus-sdk -p unibus-lua -p unibus-ffi`
 
-The default suite checks that LuaJIT is enabled and a hot loop generates a
-compiled trace, as well as exercising full-duplex messaging through the VM.
+The LuaJIT suite checks that JIT is enabled and a hot loop generates a
+compiled trace. All backend suites exercise full-duplex messaging through the VM.
 Check alternative hosts independently (backend features are mutually exclusive):
 
-`cargo test -p unibus-lua --no-default-features --features luau`
+`cargo test -p unibus-lua --no-default-features --features luajit`
 
 `cargo test -p unibus-lua --no-default-features --features lua54`
 
