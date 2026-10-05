@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+isochrone = { path = "../../../isochrone/crates/isochrone", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
@@ -15,3 +16,11 @@ stream-descriptors = { path = "../stream-descriptors" }
 [dev-dependencies]
 serde_json.workspace = true
 isochrone-core = { path = "../../../isochrone/crates/isochrone-core" }
+
+[features]
+isochrone = ["dep:isochrone"]
+
+[[bin]]
+name = "unibus-isochrone"
+path = "src/bin/unibus-isochrone.rs"
+required-features = ["isochrone"]
