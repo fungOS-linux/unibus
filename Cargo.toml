@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/unibus", "crates/unibus-dcp", "crates/unibus-device", "crates/unibus-input", "crates/unibus-mcp", "crates/unibus-media", "crates/unibus-midi", "crates/unibus-mqtt", "crates/unibus-mycelium", "crates/unibus-quic", "crates/unibus-router", "crates/stream-descriptors"]
+members = ["crates/unibus", "crates/unibus-dcp", "crates/unibus-device", "crates/unibus-fix", "crates/unibus-input", "crates/unibus-mcp", "crates/unibus-media", "crates/unibus-midi", "crates/unibus-mqtt", "crates/unibus-mycelium", "crates/unibus-qemu", "crates/unibus-quic", "crates/unibus-recording", "crates/unibus-router", "crates/stream-descriptors"]
 resolver = "2"
 
 [workspace.package]
@@ -10,6 +10,7 @@ license = "LicenseRef-Proprietary"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+json5 = "0.4"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

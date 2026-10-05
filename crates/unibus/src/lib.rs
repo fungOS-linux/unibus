@@ -31,9 +31,7 @@ pub use adapter::{
     AdapterDescriptor, AdapterInterest, AdapterReconciler, AdapterState, AdapterStatus,
 };
 pub use auth::{AuthError, NodeClaims, OfflineVerifier};
-pub use conformance::{
-    AdapterConformanceFixture, QueueSnapshot, verify_adapter_lifecycle,
-};
+pub use conformance::{AdapterConformanceFixture, QueueSnapshot, verify_adapter_lifecycle};
 pub use direct::{DirectSessionClaims, DirectSessionError, DirectSessionVerifier, PeerBinding};
 pub use discovery::{
     EndpointSource, NetworkEndpoint, NetworkEndpointError, ServiceDirectory, ServiceObservation,

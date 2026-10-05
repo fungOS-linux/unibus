@@ -107,8 +107,7 @@ pub fn verify_adapter_lifecycle(fixture: &AdapterConformanceFixture) -> Result<(
         maximum_delay: Duration::from_millis(40),
         stable_after: Duration::from_secs(1),
     };
-    let mut reconnect =
-        ReconnectBackoff::new(policy).map_err(|error| anyhow::anyhow!(error))?;
+    let mut reconnect = ReconnectBackoff::new(policy).map_err(|error| anyhow::anyhow!(error))?;
     ensure!(reconnect.failed_after(Duration::ZERO) == Duration::from_millis(10));
     ensure!(reconnect.failed_after(Duration::ZERO) == Duration::from_millis(20));
     ensure!(reconnect.failed_after(Duration::ZERO) == Duration::from_millis(40));
