@@ -8,7 +8,9 @@ license.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+sha2.workspace = true
 unibus.workspace = true
+stream-descriptors = { path = "../stream-descriptors" }
 
 [dev-dependencies]
 serde_json.workspace = true

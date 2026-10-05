@@ -2063,6 +2063,8 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
+ "sha2",
+ "stream-descriptors",
  "unibus",
 ]
 
