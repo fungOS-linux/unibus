@@ -270,12 +270,23 @@ mod tests {
                 }
             };
             for i in 0..300 {
+                let sample = unibus::StreamEvent {
+                    stream_id: "radioman/adsb/observations".into(),
+                    contract: "radioman.adsb.observation.v1".into(),
+                    sequence: i + 1,
+                    observed_at_unix_ms: 1_000 + i,
+                    value: serde_json::json!({"icao24":"abc123"}),
+                };
+                sample.validate().unwrap();
                 let event = Envelope::new(
                     "test",
                     "source",
                     Some("sdk"),
                     "secret-transport-token",
-                    Message::new("test.event.v1", serde_json::json!({"index":i})),
+                    Message::new(
+                        unibus::STREAM_EVENT_KIND,
+                        serde_json::to_value(sample).unwrap(),
+                    ),
                 );
                 framing::write_frame(&mut socket, &event, &[]).unwrap();
             }
@@ -301,6 +312,11 @@ mod tests {
         assert_eq!(session.status().dropped_events, 300 - QUEUE_CAPACITY as u64);
         let mut count = 0;
         while let Some(event) = session.poll() {
+            assert_eq!(event.kind, unibus::STREAM_EVENT_KIND);
+            let sample: unibus::StreamEvent = serde_json::from_value(event.body.clone()).unwrap();
+            sample.validate().unwrap();
+            assert_eq!(sample.contract, "radioman.adsb.observation.v1");
+            assert_eq!(sample.sequence, count as u64 + 1);
             assert!(
                 !serde_json::to_string(&event)
                     .unwrap()
