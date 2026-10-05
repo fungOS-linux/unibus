@@ -7,7 +7,7 @@
 
 use std::{
     collections::BTreeSet,
-    io::{BufRead, Write},
+    io::{BufRead, Read, Write},
 };
 
 use anyhow::{Context, Result, bail, ensure};
@@ -20,6 +20,7 @@ pub const REPLAY_CAPABILITY: &str = "unibus.record.replay";
 pub const FORMAT_VERSION: u32 = 1;
 pub const MAX_METADATA_BYTES: usize = 1024 * 1024;
 pub const MAX_RECORDS: u64 = 10_000_000;
+pub const MAX_REPLAY_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingAuthority {
@@ -98,6 +99,7 @@ pub struct Recorder<W> {
     writer: W,
     header: RecordingHeader,
     next_sequence: u64,
+    previous_offset_ms: u64,
 }
 
 impl<W: Write> Recorder<W> {
@@ -118,10 +120,19 @@ impl<W: Write> Recorder<W> {
             writer,
             header,
             next_sequence: 0,
+            previous_offset_ms: 0,
         })
     }
 
-    pub fn record(&mut self, captured_at_unix_ms: u64, envelope: Envelope) -> Result<()> {
+    pub fn record(&mut self, captured_at_unix_ms: u64, mut envelope: Envelope) -> Result<()> {
+        ensure!(
+            envelope.payload_bytes == 0,
+            "binary payload recording requires a payload-aware recording format"
+        );
+        // Replay publishers resolve current credentials from their authority.
+        // Transport credentials must never become durable recording artifacts.
+        envelope.token.clear();
+
         ensure!(
             self.next_sequence < MAX_RECORDS,
             "recording reached its record bound"
@@ -139,7 +150,17 @@ impl<W: Write> Recorder<W> {
             captured_offset_ms: captured_at_unix_ms - self.header.created_at_unix_ms,
             envelope,
         };
+        ensure!(
+            record.captured_offset_ms >= self.previous_offset_ms,
+            "capture time moved backwards"
+        );
+        ensure!(
+            serde_json::to_vec(&record)?.len() <= MAX_METADATA_BYTES,
+            "record exceeds metadata bound"
+        );
+        let offset = record.captured_offset_ms;
         write_line(&mut self.writer, &RecordLine::Envelope { record })?;
+        self.previous_offset_ms = offset;
         self.next_sequence += 1;
         Ok(())
     }
@@ -207,8 +228,8 @@ pub fn read_replay(
         policy.rate.numerator > 0 && policy.rate.denominator > 0,
         "invalid replay rate"
     );
-    let mut lines = reader.lines();
-    let first = lines.next().context("recording is empty")??;
+    let mut reader = reader;
+    let first = bounded_line(&mut reader)?.context("recording is empty")?;
     ensure!(
         first.len() <= MAX_METADATA_BYTES,
         "recording header is too large"
@@ -223,8 +244,15 @@ pub fn read_replay(
     let mut events = Vec::new();
     let mut expected_sequence = 0_u64;
     let mut previous_offset = 0_u64;
-    for line in lines {
-        let line = line.context("read recording line")?;
+    let mut total_bytes = first.len();
+    while let Some(line) = bounded_line(&mut reader)? {
+        total_bytes = total_bytes
+            .checked_add(line.len())
+            .context("recording size overflow")?;
+        ensure!(
+            total_bytes <= MAX_REPLAY_BYTES,
+            "recording exceeds in-memory replay bound"
+        );
         ensure!(
             line.len() <= unibus::MAX_FRAME as usize * 2,
             "recording line is too large"
@@ -254,10 +282,27 @@ pub fn read_replay(
             record.envelope.message.kind
         );
         let delay_ms = policy.rate.scale(record.captured_offset_ms)?;
-        record.envelope.issued_at_unix_ms = policy
+        ensure!(
+            record.envelope.payload_bytes == 0,
+            "recording omits declared binary payload"
+        );
+        record.envelope.token.clear();
+        let original_capture = header
+            .created_at_unix_ms
+            .checked_add(record.captured_offset_ms)
+            .context("capture timestamp overflow")?;
+        ensure!(
+            record.envelope.issued_at_unix_ms <= original_capture,
+            "envelope issued after capture"
+        );
+        let original_age_ms = original_capture - record.envelope.issued_at_unix_ms;
+        let replay_capture = policy
             .replay_start_unix_ms
             .checked_add(delay_ms)
             .context("replay timestamp overflow")?;
+        record.envelope.issued_at_unix_ms = replay_capture
+            .checked_sub(original_age_ms)
+            .context("replay cannot preserve original age")?;
         events.push(ReplayEvent {
             sequence: record.sequence,
             delay_ms,
@@ -271,6 +316,21 @@ pub fn read_replay(
         );
     }
     Ok((header, events))
+}
+
+fn bounded_line(reader: &mut impl BufRead) -> Result<Option<String>> {
+    let mut bytes = Vec::new();
+    let count = reader
+        .take((MAX_METADATA_BYTES + 1) as u64)
+        .read_until(b'\n', &mut bytes)?;
+    if count == 0 {
+        return Ok(None);
+    }
+    ensure!(count <= MAX_METADATA_BYTES, "recording line exceeds bound");
+    ensure!(bytes.last() == Some(&b'\n'), "truncated recording line");
+    Ok(Some(
+        String::from_utf8(bytes).context("recording is not UTF-8")?,
+    ))
 }
 
 fn validate_id(value: &str, label: &str) -> Result<()> {
@@ -329,6 +389,48 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn credentials_are_stripped_and_capture_age_is_preserved() {
+        let mut recorder = Recorder::new(
+            Vec::new(),
+            header(),
+            &RecordingAuthority::new([RECORD_CAPABILITY]),
+        )
+        .unwrap();
+        let mut event = envelope("sensor.observation.v2", 100);
+        event.token = "credential-that-must-not-be-stored".into();
+        recorder.record(1_200, event).unwrap();
+        let bytes = recorder.into_inner();
+        assert!(!String::from_utf8_lossy(&bytes).contains("credential-that"));
+        let policy = ReplayPolicy {
+            replay_start_unix_ms: 10_000,
+            rate: ReplayRate::REALTIME,
+            allowed_message_kinds: BTreeSet::from(["sensor.observation.v2".into()]),
+        };
+        let (_, events) = read_replay(
+            Cursor::new(bytes),
+            &RecordingAuthority::new([REPLAY_CAPABILITY]),
+            &policy,
+        )
+        .unwrap();
+        assert!(events[0].envelope.validate("home", 10_200).is_err());
+        assert!(events[0].envelope.token.is_empty());
+    }
+
+    #[test]
+    fn binary_payload_loss_and_oversized_lines_are_rejected() {
+        let mut recorder = Recorder::new(
+            Vec::new(),
+            header(),
+            &RecordingAuthority::new([RECORD_CAPABILITY]),
+        )
+        .unwrap();
+        let mut event = envelope("audio.playback_chunk", 100);
+        event.payload_bytes = 288;
+        assert!(recorder.record(1_000, event).is_err());
+        assert!(bounded_line(&mut Cursor::new(vec![b'a'; MAX_METADATA_BYTES + 1])).is_err());
     }
 
     #[test]
