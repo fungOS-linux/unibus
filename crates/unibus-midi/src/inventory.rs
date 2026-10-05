@@ -131,7 +131,9 @@ impl MidiPortInventory {
     }
 
     pub fn is_fresh(&self, now_ms: u64) -> bool {
-        self.observed_at_unix_ms <= now_ms && now_ms < self.valid_until_unix_ms
+        unibus::envelope::lease_is_fresh(
+            self.observed_at_unix_ms, self.valid_until_unix_ms, now_ms,
+        )
     }
 }
 
@@ -237,5 +239,18 @@ mod tests {
             .unwrap();
         assert!(registry.current(200)[0].ports.is_empty());
         assert!(registry.current(1200).is_empty());
+    }
+
+    #[test]
+    fn inventory_uses_envelope_clock_skew_without_loosening_expiry() {
+        let inventory = MidiPortInventory::from_names("studio".into(), 6000, 1000, []).unwrap();
+        assert!(inventory.is_fresh(1000));
+        assert!(!inventory.is_fresh(999));
+        assert!(!inventory.is_fresh(7000));
+        let mut registry = MidiInventoryRegistry::default();
+        registry.observe("studio", inventory.clone(), 1000).unwrap();
+        assert!(registry.observe("studio", inventory, 1001).is_err());
+        assert_eq!(registry.current(1000).len(), 1);
+        assert!(registry.current(7000).is_empty());
     }
 }

@@ -116,6 +116,15 @@ pub struct Envelope {
 /// How much a clock may run ahead of the validator before rejection.
 pub const MAX_FUTURE_SKEW_MS: u64 = 5_000;
 
+/// Advisory leases share the control envelope's bounded clock-skew allowance.
+/// Expiry is never extended by that allowance; callers still validate their
+/// contract-specific maximum lifetime and monotonically increasing revisions.
+pub fn lease_is_fresh(issued_at: u64, expires_at: u64, now: u64) -> bool {
+    expires_at > issued_at
+        && issued_at <= now.saturating_add(MAX_FUTURE_SKEW_MS)
+        && now < expires_at
+}
+
 impl Envelope {
     pub fn new(
         installation_id: &str,
@@ -206,6 +215,15 @@ pub fn next_request_id() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn leases_allow_bounded_skew_without_extending_expiry() {
+        use super::{lease_is_fresh, MAX_FUTURE_SKEW_MS};
+        assert!(lease_is_fresh(100 + MAX_FUTURE_SKEW_MS, 10_000, 100));
+        assert!(!lease_is_fresh(101 + MAX_FUTURE_SKEW_MS, 10_000, 100));
+        assert!(!lease_is_fresh(100, 200, 200));
+        assert!(!lease_is_fresh(200, 100, 100));
+        assert!(!lease_is_fresh(u64::MAX, u64::MAX, u64::MAX));
+    }
     use super::*;
 
     fn message() -> Message {

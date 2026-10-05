@@ -2693,6 +2693,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "unibus-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "unibus",
+ "unibus-router",
+]
+
+[[package]]
 name = "unibus-qemu"
 version = "0.1.0"
 dependencies = [
