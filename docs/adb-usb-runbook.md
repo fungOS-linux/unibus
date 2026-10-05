@@ -67,6 +67,8 @@ schema version, authenticated producer, generation, observed/expiry timestamps,
 `available`/`unavailable` state and bounded serial/state/USB/model/product facts.
 The six-second lease expires crashed observers; an available empty list means
 no devices, while unavailable means the ADB backend could not be queried.
+Two seconds of bounded future-clock skew are tolerated between hosts; expired
+leases are never accepted.
 Unauthorized/offline devices remain explicitly distinguishable. A network ADB
 device is never mislabeled USB. Consumers must replace the snapshot, not append
 its devices. Repeated snapshots don't flood the attach log; changes are logged.

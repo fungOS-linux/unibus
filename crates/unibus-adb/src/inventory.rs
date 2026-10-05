@@ -31,8 +31,9 @@ impl Inventory {
                 && self.producer_id == producer
                 && self.generation > 0
                 && self.observed_at_unix_ms > 0
-                && self.observed_at_unix_ms <= now
+                && self.observed_at_unix_ms <= now.saturating_add(2000)
                 && self.valid_until_unix_ms > now
+                && self.valid_until_unix_ms > self.observed_at_unix_ms
                 && self
                     .valid_until_unix_ms
                     .saturating_sub(self.observed_at_unix_ms)
@@ -153,6 +154,10 @@ mod tests {
         inventory.validate("studio-adb", 101).unwrap();
         assert!(inventory.validate("rogue", 101).is_err());
         assert!(inventory.validate("studio-adb", 6100).is_err());
-        assert!(inventory.validate("studio-adb", 99).is_err());
+        inventory.validate("studio-adb", 99).unwrap();
+        let mut ahead = inventory;
+        ahead.observed_at_unix_ms = 2101;
+        ahead.valid_until_unix_ms = 8101;
+        assert!(ahead.validate("studio-adb", 100).is_err());
     }
 }
