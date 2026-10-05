@@ -43,7 +43,7 @@ pub struct Status {
 }
 
 pub struct Session {
-    outbound: SyncSender<(String, Publish)>,
+    outbound: SyncSender<(String, Publish, Vec<u8>)>,
     inbound: Receiver<Event>,
     alive: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
@@ -81,7 +81,7 @@ impl Session {
     pub fn connect(mut config: ClientConfig) -> Result<Self> {
         config.read_timeout_ms = 10;
         let client = Client::connect(config)?;
-        let (outbound, commands) = mpsc::sync_channel::<(String, Publish)>(QUEUE_CAPACITY);
+        let (outbound, commands) = mpsc::sync_channel::<(String, Publish, Vec<u8>)>(QUEUE_CAPACITY);
         let (events, inbound) = mpsc::sync_channel(QUEUE_CAPACITY);
         let alive = Arc::new(AtomicBool::new(true));
         let stop = Arc::new(AtomicBool::new(false));
@@ -90,7 +90,7 @@ impl Session {
         let worker = thread::spawn(move || {
             while !s.load(Ordering::Acquire) {
                 for _ in 0..16 {
-                    let Ok((request_id, command)) = commands.try_recv() else {
+                    let Ok((request_id, command, payload)) = commands.try_recv() else {
                         break;
                     };
                     let sent = client
@@ -100,7 +100,8 @@ impl Session {
                         )
                         .and_then(|mut envelope| {
                             envelope.request_id = request_id;
-                            client.send(&envelope, &[])
+                            envelope.payload_bytes = payload.len();
+                            client.send(&envelope, &payload)
                         });
                     if sent.is_err() {
                         a.store(false, Ordering::Release);
@@ -146,14 +147,23 @@ impl Session {
     }
     /// Success means queued, not sent or authorized. Observe router replies.
     pub fn publish(&self, command: Publish) -> Result<String> {
+        self.publish_payload(command, Vec::new())
+    }
+    /// Publish a bounded binary packet alongside its owner-defined JSON body.
+    /// This is for small packets such as MIDI, not bulk media streams.
+    pub fn publish_payload(&self, command: Publish, payload: Vec<u8>) -> Result<String> {
         command.validate()?;
+        ensure!(
+            payload.len() <= MAX_BODY_BYTES,
+            "binary packet exceeds 64 KiB"
+        );
         ensure!(
             self.status().connected,
             "session disconnected; reconnect explicitly"
         );
         let request_id = unibus::envelope::next_request_id();
         self.outbound
-            .try_send((request_id.clone(), command))
+            .try_send((request_id.clone(), command, payload))
             .map_err(|_| anyhow::anyhow!("outbound queue full or disconnected"))?;
         Ok(request_id)
     }
@@ -203,6 +213,11 @@ mod tests {
             body: serde_json::json!({}),
         };
         let mut ids = std::collections::HashSet::new();
+        assert!(
+            session
+                .publish_payload(command(), vec![0; MAX_BODY_BYTES + 1])
+                .is_err()
+        );
         for _ in 0..QUEUE_CAPACITY {
             assert!(ids.insert(session.publish(command()).unwrap()));
         }
@@ -213,7 +228,7 @@ mod tests {
                 .to_string()
                 .contains("queue full")
         );
-        let (id, _) = commands.try_recv().unwrap();
+        let (id, _, _) = commands.try_recv().unwrap();
         assert!(ids.contains(&id));
         assert!(session.publish(command()).is_ok());
     }
@@ -244,8 +259,10 @@ mod tests {
             );
             framing::write_frame(&mut socket, &reply, &[]).unwrap();
             let received_id = loop {
-                let (command, _) = framing::read_frame(&mut socket).unwrap();
+                let (command, payload) = framing::read_frame(&mut socket).unwrap();
                 if command.message.kind == "test.command.v1" {
+                    assert_eq!(payload, [0x99, 36, 100]);
+                    assert_eq!(command.payload_bytes, payload.len());
                     break command.request_id;
                 }
             };
@@ -263,11 +280,14 @@ mod tests {
         });
         let session = Session::connect(config).unwrap();
         let request_id = session
-            .publish(Publish {
-                destination: Some("source".into()),
-                kind: "test.command.v1".into(),
-                body: serde_json::json!({}),
-            })
+            .publish_payload(
+                Publish {
+                    destination: Some("source".into()),
+                    kind: "test.command.v1".into(),
+                    body: serde_json::json!({}),
+                },
+                vec![0x99, 36, 100],
+            )
             .unwrap();
         assert_eq!(router.join().unwrap(), request_id);
         let deadline = Instant::now() + Duration::from_secs(5);

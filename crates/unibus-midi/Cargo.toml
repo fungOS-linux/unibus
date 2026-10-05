@@ -6,13 +6,15 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-midir.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 unibus.workspace = true
 sha2.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
+midir.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
