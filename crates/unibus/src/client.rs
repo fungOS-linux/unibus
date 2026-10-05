@@ -3,6 +3,7 @@
 //! A single writer lock keeps registration, heartbeats, and payload frames
 //! from interleaving. Readers time out so services can perform housekeeping.
 
+use std::io::Read;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,7 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
-use crate::{Envelope, FrameError, Message, SCHEMA_VERSION_V1, framing, kinds};
+use crate::{Envelope, FrameError, MAX_FRAME, Message, SCHEMA_VERSION_V1, framing, kinds};
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
 const DEFAULT_READ_TIMEOUT_MS: u64 = 10_000;
@@ -73,6 +74,8 @@ fn valid_env_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::net::TcpListener;
 
     #[test]
     fn token_source_is_explicit_and_environment_names_are_bounded() {
@@ -82,15 +85,100 @@ mod tests {
             r#"{"installation_id":"home","producer_id":"surf","hub_endpoint":"127.0.0.1:1","zones":["default"]}"#,
         )
         .unwrap();
-        assert!(missing.token().unwrap_err().to_string().contains("exactly one"));
+        assert!(
+            missing
+                .token()
+                .unwrap_err()
+                .to_string()
+                .contains("exactly one")
+        );
+    }
+
+    #[test]
+    fn partial_frame_survives_a_read_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut writer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (reader, _) = listener.accept().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_millis(10)))
+            .unwrap();
+        let mut reader = FrameReader::new(reader);
+        let envelope = Envelope::new(
+            "home",
+            "source",
+            Some("destination"),
+            "token",
+            Message::new("test.event.v1", serde_json::json!({"value": 7})),
+        );
+        let body = framing::encode_frame(&envelope, &[]).unwrap();
+        let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+        frame.extend_from_slice(&body);
+
+        writer.write_all(&frame[..2]).unwrap();
+        assert!(reader.try_read().unwrap().is_none());
+        writer.write_all(&frame[2..]).unwrap();
+        let (received, payload) = reader.try_read().unwrap().unwrap();
+        assert_eq!(received.message.kind, "test.event.v1");
+        assert!(payload.is_empty());
     }
 }
 
 pub struct Client {
     config: ClientConfig,
-    reader: Mutex<TcpStream>,
+    reader: Mutex<FrameReader>,
     writer: Arc<Mutex<TcpStream>>,
     stop: Arc<AtomicBool>,
+}
+
+struct FrameReader {
+    stream: TcpStream,
+    buffered: Vec<u8>,
+    frame_bytes: Option<usize>,
+}
+
+impl FrameReader {
+    fn new(stream: TcpStream) -> Self {
+        Self {
+            stream,
+            buffered: Vec::new(),
+            frame_bytes: None,
+        }
+    }
+
+    fn try_read(&mut self) -> Result<Option<(Envelope, Vec<u8>)>> {
+        loop {
+            if self.frame_bytes.is_none() && self.buffered.len() >= 4 {
+                let total = u32::from_be_bytes(self.buffered[..4].try_into().unwrap());
+                if total == 0 || total > MAX_FRAME {
+                    return Err(FrameError::TooLarge { total }.into());
+                }
+                self.frame_bytes = Some(4 + total as usize);
+            }
+            if let Some(frame_bytes) = self.frame_bytes
+                && self.buffered.len() >= frame_bytes
+            {
+                let body = self.buffered[4..frame_bytes].to_vec();
+                self.buffered.drain(..frame_bytes);
+                self.frame_bytes = None;
+                return framing::decode_frame(&body).map(Some).map_err(Into::into);
+            }
+
+            let mut chunk = [0_u8; 64 * 1024];
+            match self.stream.read(&mut chunk) {
+                Ok(0) => anyhow::bail!("Unibus connection closed while reading a frame"),
+                Ok(read) => self.buffered.extend_from_slice(&chunk[..read]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) || matches!(error.raw_os_error(), Some(11 | 35)) =>
+                {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
 }
 
 impl Client {
@@ -189,7 +277,7 @@ impl Client {
         }
         Ok(Self {
             config,
-            reader: Mutex::new(reader),
+            reader: Mutex::new(FrameReader::new(reader)),
             writer,
             stop,
         })
@@ -229,18 +317,7 @@ impl Client {
             !self.stop.load(Ordering::Acquire),
             "heartbeat writer stopped"
         );
-        match framing::read_frame(&mut *self.reader.lock().unwrap()) {
-            Ok(frame) => Ok(Some(frame)),
-            Err(FrameError::Io(error))
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) || matches!(error.raw_os_error(), Some(11 | 35)) =>
-            {
-                Ok(None)
-            }
-            Err(error) => Err(error.into()),
-        }
+        self.reader.lock().unwrap().try_read()
     }
 }
 
