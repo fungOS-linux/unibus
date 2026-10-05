@@ -9,6 +9,7 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
 pub const STREAM_INTEREST_KIND: &str = "unibus.stream.interest.v1";
+pub const STREAM_INTEREST_RELEASE_KIND: &str = "unibus.stream.interest.release.v1";
 pub const STREAM_EVENT_KIND: &str = "unibus.stream.event.v1";
 
 const MAX_STREAMS_PER_INTEREST: usize = 128;
@@ -47,6 +48,17 @@ pub struct StreamInterest {
     pub stream_ids: Vec<String>,
     pub issued_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
+}
+
+/// Immediate cancellation of one renewable demand lease.
+///
+/// Expiry remains the crash-safe fallback. A release lets visibility-aware
+/// consumers stop upstream work as soon as their view leaves the screen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamInterestRelease {
+    pub lease_id: String,
+    pub consumer_id: String,
 }
 
 /// One bounded, typed event on a canonical stream.
@@ -98,6 +110,13 @@ impl StreamInterest {
 
     pub fn active_at(&self, now_unix_ms: u64) -> bool {
         self.issued_at_unix_ms <= now_unix_ms && now_unix_ms < self.expires_at_unix_ms
+    }
+}
+
+impl StreamInterestRelease {
+    pub fn validate(&self) -> Result<()> {
+        validate_id(&self.lease_id, "stream lease id")?;
+        validate_id(&self.consumer_id, "stream consumer id")
     }
 }
 
@@ -160,6 +179,18 @@ mod tests {
         event.validate().unwrap();
         let mut invalid = event;
         invalid.stream_id = "not a stream?".into();
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn release_names_exactly_one_consumer_owned_lease() {
+        let release = StreamInterestRelease {
+            lease_id: "canvas:studio-mix".into(),
+            consumer_id: "canvas-neo".into(),
+        };
+        release.validate().unwrap();
+        let mut invalid = release;
+        invalid.lease_id = "not a lease?".into();
         assert!(invalid.validate().is_err());
     }
 }

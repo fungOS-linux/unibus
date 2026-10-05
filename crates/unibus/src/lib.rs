@@ -22,6 +22,7 @@ pub mod kinds;
 pub mod peer;
 pub mod qos;
 pub mod reconnect;
+pub mod service_adoption;
 pub mod stream;
 
 pub use adapter::{
@@ -31,7 +32,8 @@ pub use adapter::{
 pub use auth::{AuthError, NodeClaims, OfflineVerifier};
 pub use direct::{DirectSessionClaims, DirectSessionError, DirectSessionVerifier, PeerBinding};
 pub use discovery::{
-    EndpointSource, NetworkEndpoint, NetworkEndpointError, StaticEndpointSource, Transport,
+    EndpointSource, NetworkEndpoint, NetworkEndpointError, ServiceDirectory, ServiceObservation,
+    StaticEndpointSource, StaticServiceDirectory, Transport,
 };
 pub use envelope::{
     DEFAULT_TTL_MS, Envelope, EnvelopeError, MAX_FRAME, MAX_FUTURE_SKEW_MS, Message,
@@ -46,7 +48,8 @@ pub use peer::{
 };
 pub use qos::Qos;
 pub use reconnect::{ReconnectBackoff, ReconnectPolicy};
+pub use service_adoption::{AdoptionPolicy, AdoptionState, AdoptionStatus};
 pub use stream::{
-    STREAM_EVENT_KIND, STREAM_INTEREST_KIND, StreamDirection, StreamEvent, StreamImportance,
-    StreamInterest, StreamRequirement,
+    STREAM_EVENT_KIND, STREAM_INTEREST_KIND, STREAM_INTEREST_RELEASE_KIND, StreamDirection,
+    StreamEvent, StreamImportance, StreamInterest, StreamInterestRelease, StreamRequirement,
 };

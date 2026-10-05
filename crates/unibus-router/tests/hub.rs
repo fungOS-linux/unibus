@@ -12,6 +12,7 @@ use unibus::framing::{read_frame, write_frame};
 use unibus::kinds::{self, Control};
 use unibus::{
     AuthError, NodeClaims, OfflineVerifier, STREAM_EVENT_KIND, STREAM_INTEREST_KIND,
+    STREAM_INTEREST_RELEASE_KIND,
 };
 use unibus_router::{
     Hub, HubConfig, StreamRouter,
@@ -40,7 +41,7 @@ fn hub_config(dir: &std::path::Path, extra_routes: &str) -> HubConfig {
         ],
         "nodes": [
             {{"producer_id": "brain", "token_file": "token", "zones": ["default", "living-room"], "capabilities": ["display", "audio_output", "presence_capture", "canvas.command"], "publishes": ["canvas_command", "audio_playback_chunk", "test.publish", "fr_response", "mute_request", "totally_unknown_kind"], "publish_zones": ["default", "living-room", "nowhere"], "publish_screen_anchors": ["screen-tv", "screen-left"], "publish_producers": ["tv", "ghost"]}},
-            {{"producer_id": "tv", "token_file": "token", "zones": ["living-room"], "capabilities": ["display"], "screen_anchors": ["screen-tv"], "publishes": ["unibus.stream.interest.v1"]}},
+            {{"producer_id": "tv", "token_file": "token", "zones": ["living-room"], "capabilities": ["display"], "screen_anchors": ["screen-tv"], "publishes": ["unibus.stream.interest.v1", "unibus.stream.interest.release.v1"]}},
             {{"producer_id": "studio", "token_file": "token", "zones": ["default"], "capabilities": ["display"], "screen_anchors": ["screen-left"], "publishes": ["test.publish"], "publish_zones": ["default"]}},
             {{"producer_id": "speaker", "token_file": "token", "zones": ["living-room"], "capabilities": ["audio_output"], "publishes": ["unibus.stream.event.v1"]}}
         ]
@@ -718,8 +719,42 @@ fn stream_router_delivers_only_after_a_bounded_interest() {
         )
         .unwrap();
     let delivered = consumer.recv_until(STREAM_EVENT_KIND);
-    assert_eq!(delivered.message.body["stream_id"], "synesthesia/mix/control");
+    assert_eq!(
+        delivered.message.body["stream_id"],
+        "synesthesia/mix/control"
+    );
     assert_eq!(delivered.message.body["value"]["strip"], 7);
+
+    consumer
+        .send(
+            Message::new(
+                STREAM_INTEREST_RELEASE_KIND,
+                json!({"lease_id": "tv:mix", "consumer_id": "tv"}),
+            ),
+            None,
+        )
+        .unwrap();
+    assert_eq!(consumer.recv_reply().message.body["success"], json!(true));
+    producer
+        .send(
+            Message::new(
+                STREAM_EVENT_KIND,
+                json!({
+                    "stream_id": "synesthesia/mix/control",
+                    "contract": "synesthesia.mix.control.v1",
+                    "sequence": 2,
+                    "observed_at_unix_ms": now,
+                    "value": {"surface": "launchkey", "strip": 7, "gain": 0.5}
+                }),
+            ),
+            None,
+        )
+        .unwrap();
+    consumer
+        .stream
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    assert!(read_frame(&mut consumer.stream).is_err());
 }
 
 #[test]
