@@ -2022,6 +2022,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "unibus-device"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "unibus-input"
 version = "0.1.0"
 dependencies = [
