@@ -69,7 +69,23 @@ fn main() -> Result<()> {
         (5..=100).contains(&config.chunk_ms),
         "chunk_ms must be 5..=100"
     );
-    let frames = config.sample_rate_hz * config.chunk_ms / 1_000;
+    ensure!(
+        (8_000..=192_000).contains(&config.sample_rate_hz),
+        "invalid PCM sample rate"
+    );
+    ensure!(
+        (1..=8).contains(&config.channels),
+        "invalid PCM channel count"
+    );
+    let sample_milliseconds = config
+        .sample_rate_hz
+        .checked_mul(config.chunk_ms)
+        .context("PCM geometry overflow")?;
+    ensure!(
+        sample_milliseconds % 1_000 == 0,
+        "chunk duration must contain a whole number of PCM frames"
+    );
+    let frames = sample_milliseconds / 1_000;
     ensure!(frames > 0, "chunk duration produced no samples");
     let chunk_bytes = frames as usize * config.channels as usize * 2;
 

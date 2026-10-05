@@ -5,6 +5,7 @@
 //! presentation intent. Consumers never execute producer-supplied pipelines.
 
 use serde::{Deserialize, Serialize};
+pub mod audio_ingress;
 use sha2::{Digest, Sha256};
 use std::fmt;
 use stream_descriptors::{
