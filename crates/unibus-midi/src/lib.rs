@@ -3,6 +3,8 @@
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
+pub mod inventory;
+
 pub const MIDI_PACKET_CONTRACT: &str = "midi.packet.v1";
 pub const MIDI_INPUT_CAPABILITY: &str = "midi.input";
 pub const MIDI_OUTPUT_CAPABILITY: &str = "midi.output";

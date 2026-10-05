@@ -112,6 +112,11 @@ fn main() -> Result<()> {
     let Some(argument) = std::env::args_os().nth(1) else {
         bail!("usage: unibus-midi <bridge.json> | --list");
     };
+    if argument == "--list-json" {
+        let inventory = unibus_midi::inventory::enumerate("local", unibus::envelope::now_ms(), 6000)?;
+        println!("{}", serde_json::to_string_pretty(&inventory)?);
+        return Ok(());
+    }
     if argument == "--list" {
         return list_ports();
     }
