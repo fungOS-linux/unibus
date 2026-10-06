@@ -1,0 +1,9 @@
+Package: unibus-core
+Version: 0.1.0
+Section: net
+Priority: optional
+Architecture: amd64
+Maintainer: FPL <software@fpl.dev>
+Depends: libc6, libgcc-s1, systemd (>= 235)
+Description: Local authenticated Unibus message router
+ Fail-closed local router. Device adapters are installed separately.

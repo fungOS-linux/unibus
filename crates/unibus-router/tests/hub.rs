@@ -446,6 +446,32 @@ fn bad_token_is_rejected() {
 }
 
 #[test]
+fn empty_grant_installation_rejects_registration() {
+    let mut config: HubConfig = serde_json::from_str(include_str!(
+        "../../../deploy/linux/core/etc/unibus/hub.json"
+    ))
+    .unwrap();
+    config.listen = "127.0.0.1:0".into();
+    let addr = Arc::new(Hub::new(config).unwrap()).start().unwrap();
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let register = Envelope::new(
+        "local",
+        "unconfigured-client",
+        None,
+        TOKEN,
+        Message::new(
+            kinds::V1_REGISTER,
+            json!({"capabilities": ["display"], "zones": ["default"]}),
+        ),
+    );
+    write_frame(&mut stream, &register, &[]).unwrap();
+    assert!(read_frame(&mut stream).is_err());
+}
+
+#[test]
 fn offline_verifier_authenticates_and_binds_claim_scope() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(

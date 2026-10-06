@@ -173,10 +173,8 @@ impl HubConfig {
                 "QUIC cert_file and key_file are required"
             );
         }
-        ensure!(
-            !self.nodes.is_empty(),
-            "at least one node grant is required"
-        );
+        // An empty grant set is a valid, fail-closed installation profile.
+        // No client can register until an operator explicitly grants access.
         let mut seen = std::collections::HashSet::new();
         for node in &self.nodes {
             ensure!(
@@ -223,6 +221,27 @@ impl HubConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packaged_default_is_local_and_has_no_grants() {
+        let config: HubConfig = serde_json::from_str(include_str!(
+            "../../../deploy/linux/core/etc/unibus/hub.json"
+        ))
+        .unwrap();
+        config.validate().unwrap();
+        assert!(
+            config
+                .listen
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+                .ip()
+                .is_loopback()
+        );
+        assert!(!config.allow_insecure_lan);
+        assert!(config.nodes.is_empty());
+        assert!(config.routes.is_empty());
+        assert!(config.quic.is_none());
+    }
 
     fn write_config(dir: &std::path::Path, content: &str) -> PathBuf {
         let path = dir.join("hub.json");

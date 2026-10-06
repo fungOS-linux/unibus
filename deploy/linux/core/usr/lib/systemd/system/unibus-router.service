@@ -1,0 +1,34 @@
+[Unit]
+Description=Unibus local message router
+After=network.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+User=unibus
+ExecStart=/usr/bin/unibus-router /etc/unibus/hub.json
+Restart=on-failure
+RestartSec=2s
+RuntimeDirectory=unibus
+RuntimeDirectoryMode=0700
+StateDirectory=unibus
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=yes
+LimitNOFILE=4096
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target
