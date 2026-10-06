@@ -774,7 +774,7 @@ impl Hub {
         }
         Ok((
             delivered > 0,
-            (delivered == 0).then(|| "no eligible nodes".to_string()),
+            (delivered == 0).then(|| kinds::REPLY_NO_ELIGIBLE_NODES.to_string()),
         ))
     }
 

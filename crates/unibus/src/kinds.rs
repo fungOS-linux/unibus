@@ -23,6 +23,9 @@ pub const REGISTER: &str = "unibus.register";
 pub const NODE_STATE: &str = "unibus.node_state";
 pub const HEARTBEAT: &str = "unibus.heartbeat";
 pub const REPLY: &str = "unibus.reply";
+/// Legacy reply-body reason for valid routing with no connected recipients.
+/// This is idle demand, not authorization failure or delivery success.
+pub const REPLY_NO_ELIGIBLE_NODES: &str = "no eligible nodes";
 
 pub fn classify(kind: &str) -> Control {
     match kind {

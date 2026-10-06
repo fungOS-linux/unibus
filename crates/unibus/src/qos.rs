@@ -59,6 +59,8 @@ impl Qos {
             | "canvas.workspace_state.v1"
             | "unibus.adapter.catalog.v1"
             | "unibus.adapter.status.v1"
+            | "unibus.service.catalog.v1"
+            | "unibus.service.health.v1"
             | "media.video_stream.v1"
             | "spatial.presence.v1"
             | "spatial.vitals.v1"
@@ -91,6 +93,13 @@ mod tests {
         assert_eq!(Qos::of_kind("canvas.command"), Qos::Command);
         assert_eq!(Qos::of_kind("heartbeat"), Qos::Command);
         assert_eq!(Qos::of_kind("totally.unknown_kind"), Qos::Command);
+    }
+
+    #[test]
+    fn service_inventory_is_explicitly_latest_value_not_prefix_classified() {
+        assert_eq!(Qos::of_kind("unibus.service.catalog.v1"), Qos::Snapshot);
+        assert_eq!(Qos::of_kind("unibus.service.health.v1"), Qos::Snapshot);
+        assert_eq!(Qos::of_kind("unibus.service.execute.v1"), Qos::Command);
     }
 
     #[test]
