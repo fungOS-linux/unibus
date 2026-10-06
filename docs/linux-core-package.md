@@ -16,22 +16,55 @@ dynamic user. Discovery never grants authorization.
 
 ## Build and inspect (Linux, isolated working directory)
 
-Run from the repository root. The binary must be built from the same revision
-as this payload, not copied from a shared target cache. `amd64` below is the
-reference target; arm64 needs a matching build and control Architecture field.
+Run from a clean tracked-source checkout with the workspace's existing sibling
+Isochrone checkout available. The binary and packager must be built from the
+same revision, not copied from an unrelated shared target cache. An actively
+modified workspace may legitimately require a different lockfile; do not
+overwrite someone else's dependency work to make this gate pass.
 
 ```sh
-cargo check -p unibus-router
-cargo test -p unibus-router
-cargo build --release -p unibus-router
-stage=$(mktemp -d /tmp/unibus-core-package.XXXXXX)
-chmod 0755 "$stage"
-cp -R deploy/linux/core/. "$stage/"
-install -Dm755 target/release/unibus-router "$stage/usr/bin/unibus-router"
-dpkg-deb --root-owner-group --build "$stage" "$stage.deb"
-dpkg-deb --info "$stage.deb"
-dpkg-deb --contents "$stage.deb"
+cargo metadata --locked --no-deps --format-version 1
+cargo check --locked -p unibus-router --all-targets
+cargo test --locked -p unibus-router
+cargo test --locked -p unibus-router --example linux_core_deb
+cargo test --locked -p unibus-router --example linux_core_deb -- --ignored
+cargo build --locked --release -p unibus-router --bin unibus-router --example linux_core_deb
+package_out=$(mktemp -d /var/tmp/unibus-core-package.XXXXXX)
+target/release/examples/linux_core_deb target/release/unibus-router "$package_out"
+dpkg-deb --info "$package_out/unibus-core_0.1.0_amd64.deb"
+dpkg-deb --contents "$package_out/unibus-core_0.1.0_amd64.deb"
 ```
+
+The Rust packager uses the shared payload assets, derives architecture from the
+ELF header (`amd64` or `arm64`), and calculates the libc floor from required GLIBC
+symbol versions using `readelf`. It rejects unknown runtime libraries and refuses
+to overwrite an existing package. It publishes only a completed archive, with
+fixed payload permissions independent of the builder's umask. Version comes
+from Cargo's package version. The explicit `--ignored` command runs its Debian
+archive integration check, which requires `readelf` and `dpkg-deb`.
+The static control file remains the amd64 reference template; generated packages
+do not trust its architecture/version/libc values. `readelf` and `dpkg-deb` are
+build dependencies, not runtime requirements. This does not yet guarantee
+bit-for-bit reproducibility or validate that a supplied executable matches the
+packager's source revision; artifact provenance remains the build owner's job.
+
+### ARM64 cross-build on Agora
+
+Use the same clean checkout and locked dependency graph. With the GNU AArch64
+cross linker/sysroot and QEMU user runner installed:
+
+```sh
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='qemu-aarch64 -L /usr/aarch64-linux-gnu'
+cargo check --locked -p unibus-router --target aarch64-unknown-linux-gnu
+cargo test --locked -p unibus-router --target aarch64-unknown-linux-gnu
+cargo build --locked --release -p unibus-router --target aarch64-unknown-linux-gnu --bin unibus-router --example linux_package_lifecycle
+target/release/examples/linux_core_deb target/aarch64-unknown-linux-gnu/release/unibus-router "$package_out"
+```
+
+User-mode emulation checks Rust behavior, not systemd. Repeat the lifecycle
+checker in a real ARM64 systemd guest before qualifying an ARM package. Neither
+step is deployment to home-pi or a measurement of native Pi performance.
 
 There are deliberately no maintainer scripts: package installation does not
 start or enable this service. Image assembly or an operator explicitly runs:
@@ -131,14 +164,44 @@ The shipped executable's highest observed GLIBC requirement was 2.34; the
 package now declares that floor. Recalculate dependencies when changing the
 toolchain rather than assuming all later builds have the same requirements.
 
-A clean full-workspace `--locked` build is **not yet a passing release gate**:
-the committed workspace references the untracked `unibus-fix` crate, and its
-committed lockfile needs reconciliation. Validation used a tracked-source
+At that initial checkpoint, a clean full-workspace `--locked` build was **not a
+passing release gate**: the committed workspace referenced the untracked
+`unibus-fix` crate, and its committed lockfile needed reconciliation. Validation used a tracked-source
 archive with that unused workspace member omitted and an offline-resolved
 lockfile in the isolated copy. No source changes from other ongoing work were
 included in the final router executable. The resolved validation source/lockfile
 is retained alongside the artifacts; this is a lifecycle proof, not a
 reproducible release build or an ARM test.
+
+### Workspace repair and ARM64 qualification
+
+`09473df` includes the verified FIX adapter and reconciles the lockfile against
+the tracked workspace, without consuming other in-progress adapter/discovery
+changes. A fresh source archive passed `cargo metadata --locked`, core/FIX
+`cargo check --locked --all-targets`, and 49 router/FIX tests. Those same 49 tests
+also passed as ARM64 executables under QEMU user emulation. The archive packager
+passed four unit tests and its explicitly invoked Debian integration test.
+This verifies the selected core/FIX targets, not compilation of every adapter.
+
+The ARM64 package then passed all seven lifecycle stages in a full-system,
+software-emulated Cortex-A72 Ubuntu 24.04.5 guest with systemd 255 and kernel
+6.8.0-142-generic. This includes the actual packaged service, not just Rust tests.
+No Pi deployment or native Pi performance claim is implied.
+The final amd64 candidate passed the same seven stages in a fresh KVM guest.
+Both disposable guests were shut down; live router and TV services were untouched.
+
+The final generated candidates are retained on Agora in
+`/var/tmp/unibus-lifecycle.giuGkV/final-packages/`:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `unibus-core_0.1.0_amd64.deb` | `93f63ee80cefdfc8751a407b1988fcc01d7a1bc974e24d06c21bd3131e33842d` |
+| `unibus-core_0.1.0_arm64.deb` | `e781bf8063e0651b21eeda1cd593fef964236679490995dce40d4968e2c05b15` |
+| `upgrade.deb` (ARM64 test fixture) | `a0e04188004d19f28132785dfc37e9e9eabe8a69ca7934e809997dfd4dc684f1` |
+
+These remain unsigned validation candidates, not published releases. The
+workspace member/lockfile gate is repaired, but the toolchain and sibling-repo
+inputs are not yet pinned for bit-for-bit release reproducibility.
 
 ## Verification and remaining gates
 
