@@ -9,7 +9,7 @@ description = "Private HDHomeRun relay and explicitly scoped LAN republication"
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["net", "time", "signal"] }
+tokio = { workspace = true, features = ["net", "time", "signal", "process"] }
 reqwest = { workspace = true, features = ["stream"] }
 unibus-quic.workspace = true
 quinn.workspace = true
