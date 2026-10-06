@@ -102,6 +102,11 @@ native LAN credential. Treat that entire configured client LAN as trusted.
    SAN `hdhomerun-owner.internal`; keep private keys mode 0600 in mode 0700
    directories. A dedicated deployment CA or explicitly trusted peer
    certificates are valid providers; the adapter does not issue fleet identity.
+   Peer certificates must be **end-entity** certificates (`CA:FALSE`) with
+   appropriate serverAuth/clientAuth usages, not the CA itself. OpenSSL's local
+   default configuration can otherwise generate a CA certificate when using
+   `req -x509`; explicitly set the basicConstraints extension. Never work around
+   rejection by disabling TLS verification.
 4. Calculate each certificate binding:
    `openssl x509 -in peer.pem -outform DER | openssl dgst -sha256`.
    Put the **other** peer's binding in each allowlist with a `sha256:` prefix.
@@ -139,3 +144,29 @@ not substitute for checking real device decoding or the FireTV UI.
 
 Protocol references: [official HTTP API](https://info.hdhomerun.com/info/http_api)
 and [official discovery framing](https://github.com/Silicondust/libhdhomerun/blob/master/hdhomerun_pkt.h).
+
+### Live acceptance — 2026-10-06
+
+Installed release binaries cross-built on Agora: static x86_64-musl on Avery
+and aarch64-gnu on home-pi. Owner, relay, and proxy units are enabled; home-pi's
+`ajmwagar` user has lingering enabled so its service persists after logout.
+Existing desktop/radio services and network routes were not modified.
+
+Verified:
+
+* Silicondust's `hdhomerun_config discover 192.168.2.74` finds physical device
+  `10626E55` at the proxy, using the vendor's independent discovery parser.
+* `/healthz` reports ready; all 55 channels' URLs use the LAN proxy, not Avery's
+  inaccessible device IP. Native lineup status is readable.
+* KOMO `4.1` survives the full Avery → Agora → home-pi private path. FFprobe
+  recognizes 1280×720 MPEG-2 video and AC-3 audio. FFmpeg decodes 189 frames in
+  a four-second sample. Initial sequence-header warnings occur while joining
+  the live MPEG-2 stream; this is not a claim of clean startup on every channel.
+* A HEAD request reports video/mp2t without allocating a physical tuner.
+* Eight automated tests pass, including real sockets and mTLS. Strict adapter
+  Clippy passes without suppressing adapter warnings.
+
+Still open: install/launch the FireTV HDHomeRun app on the permitted TV LAN
+and verify its channel selection, guide, codec support, and sustained playback.
+Vendor CLI discovery and FFmpeg decoding do not establish app compatibility.
+The proxy currently publishes only on `192.168.2.0/24`, not the Wi-Fi VLAN.
