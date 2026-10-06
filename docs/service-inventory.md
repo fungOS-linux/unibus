@@ -108,6 +108,14 @@ private tunnel for cross-host reads. The existing router owns routing,
 authentication and exact publish grants; consumers own retention. This is not
 automatic cross-hub replication or Mycelium topology gossip.
 
+Live acceptance (2026-10-06): `unibus-services` is installed on home-pi and its
+HDHomeRun catalog update is active. Activation waited until physical tuners and
+proxy stream sockets were idle. The inspector reports healthy with 56 resources;
+the stream endpoint lists 55 schema-v2 descriptors. A short native playback
+check returned HTTP 200 with MPEG-TS bytes. The publisher is not enabled yet:
+the existing router's config/grants remain protected from the default account.
+Radioman/ADB code adoption is verified in tests, not a claimed fleet rollout.
+
 Manual setup:
 
 1. Generate separate publisher and observer tokens privately using the existing

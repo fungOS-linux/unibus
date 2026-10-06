@@ -70,8 +70,8 @@ physical allocation, never guessed by the proxy. HEAD still does not tune.
 
 Protected channels are omitted and rejected; no DRM bypass, transcoding,
 device firmware updates, TCP 65001 get/set, DLNA/SSDP emulation, DVR/storage,
-channel rescan, or favorites mutation is implemented. **Stock FireTV app
-compatibility remains unverified until tested on the FireTV.** Clients needing
+channel rescan, or favorites mutation is implemented. **The user confirmed
+stock FireTV discovery and channel playback working.** Clients needing
 legacy control or assuming HTTP port 80 may need further compatibility work.
 VLC can open `/lineup.m3u` without relying on discovery.
 
@@ -193,11 +193,20 @@ Verified:
   recognizes 1280×720 MPEG-2 video and AC-3 audio. FFmpeg decodes 189 frames in
   a four-second sample. Initial sequence-header warnings occur while joining
   the live MPEG-2 stream; this is not a claim of clean startup on every channel.
-* A HEAD request reports video/mp2t without allocating a physical tuner.
-* Eight automated tests pass, including real sockets and mTLS. Strict adapter
+* A HEAD request reports video/mpeg without allocating a physical tuner.
+* Ten adapter tests pass, including real sockets and mTLS. Strict adapter
   Clippy passes without suppressing adapter warnings.
 
-Still open: install/launch the FireTV HDHomeRun app on the permitted TV LAN
-and verify its channel selection, guide, codec support, and sustained playback.
-Vendor CLI discovery and FFmpeg decoding do not establish app compatibility.
+The user confirmed the installed FireTV app discovers the device and plays a
+channel after the WebView CORS and close-delimited stream fixes. This does not
+establish every guide feature, channel codec, or long-duration soak result.
+`stock_app_verified` in the legacy `/healthz` response is not a live compatibility
+probe; operator acceptance here is separate from catalog freshness telemetry.
 The proxy currently publishes only on `192.168.2.0/24`, not the Wi-Fi VLAN.
+
+The service-inventory update was activated only after both tuners were idle.
+The installed inspector reports healthy with 56 resources (device plus 55
+channels); `/v1/streams` advertises 55 existing-schema-v2 stream documents.
+A one-second `4.1` capture returned HTTP 200 and 702636 bytes through the private
+relay. See `service-inventory.md` for the catalog/health contracts and scoped
+bus publication. Protected router grants are not yet provisioned on home-pi.
