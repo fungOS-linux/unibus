@@ -54,10 +54,19 @@ Allowed origins get GET/HEAD preflight support, including private-network
 preflights; POST is still denied. The LAN CIDR restriction applies before CORS,
 including OPTIONS. Native non-browser clients are unaffected.
 
-Metadata request diagnostics report source IP, method, bounded path/origin,
-status, and whether CORS matched. They never log DeviceAuth, response payloads,
-private keys, or query strings. A denied/unrecognized app origin is visible
+Request diagnostics report source IP, method, bounded path/origin/query-key
+names, status, HTTP version, and whether CORS matched. They never log DeviceAuth,
+response payloads, private keys, or query values. A denied/unrecognized app origin is visible
 without widening access to every website.
+
+Media HTTP responses use the tuner's `video/mpeg` MIME type and DLNA Streaming
+header. Their body is **close-delimited raw MPEG-TS**, not HTTP chunk framing.
+The current Hyper server selects this framing using HTTP/1.0 for successful
+media responses; metadata remains HTTP/1.1. The physical device uses HTTP/1.1
+with the same close-delimited body. Setting only `Connection: close` under
+Hyper's HTTP/1.1 does not disable chunk encoding. No fake Content-Length or
+handwritten HTTP server is used. `X-HDHomeRun-Resource` is relayed from the
+physical allocation, never guessed by the proxy. HEAD still does not tune.
 
 Protected channels are omitted and rejected; no DRM bypass, transcoding,
 device firmware updates, TCP 65001 get/set, DLNA/SSDP emulation, DVR/storage,
@@ -74,15 +83,18 @@ bidirectional stream, not topic events or MQTT. One stream carries one bounded
 request header, a bounded reply header, then raw response bytes through EOF.
 Headers use a big-endian u32 byte length, limited to 4096 bytes.
 
-Request contract: `unibus.hdhomerun.request.v1`:
+Request contract: `unibus.hdhomerun.request.v2`:
 
 ```json
-{"contract":"unibus.hdhomerun.request.v1","operation":{"operation":"stream","channel":"4.1","tuner":null,"duration":10}}
+{"contract":"unibus.hdhomerun.request.v2","operation":{"operation":"stream","channel":"4.1","tuner":null,"duration":10}}
 ```
 
 Other operations are `catalog` and `lineup_status`. No arbitrary URL, control
 command, or credentials are accepted in the request. Reply fields are HTTP
-`status`, `content_type`, and optional `tuner_error`. Metadata is limited to
+`status`, `content_type`, optional `tuner_error`, and optional physical `resource`.
+Upgrade the owner before the proxy: owners also accept v1 requests and omit
+the new resource field for strict v1 clients. New proxies require a v2 owner;
+they fail rather than silently guessing remote capabilities. Metadata is limited to
 1 MiB, at most 1024 channels and 16 physical tuners. Owner concurrency is
 bounded to eight connections, 32 requests, and the physical tuner count;
 the device also enforces locks shared with other applications.

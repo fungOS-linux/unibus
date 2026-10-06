@@ -10,7 +10,7 @@ use axum::{
     Router,
     body::Body,
     extract::{ConnectInfo, State},
-    http::{HeaderMap, Method, Uri},
+    http::{HeaderMap, Method, Uri, Version},
     response::Response,
     routing::any,
 };
@@ -28,8 +28,8 @@ use unibus_quic::{
 };
 
 use crate::{
-    CONTRACT, Catalog, MAX_HEADER, MAX_METADATA, Operation, Reply, Request, discovery,
-    is_protected, lineup_xml, playlist,
+    CONTRACT, Catalog, LEGACY_CONTRACT, MAX_HEADER, MAX_METADATA, Operation, Reply, Request,
+    discovery, is_protected, lineup_xml, playlist,
 };
 
 const DEADLINE: Duration = Duration::from_secs(10);
@@ -342,6 +342,7 @@ async fn send_reply(
             status,
             content_type: content_type.into(),
             tuner_error: error,
+            resource: None,
         },
     )
     .await?;
@@ -364,7 +365,11 @@ async fn owner_request(
     mut recv: quinn::RecvStream,
 ) -> Result<()> {
     let request: Request = timeout(DEADLINE, read_json(&mut recv)).await??;
-    ensure!(request.contract == CONTRACT, "unknown request contract");
+    ensure!(
+        request.contract == CONTRACT || request.contract == LEGACY_CONTRACT,
+        "unknown request contract"
+    );
+    let legacy = request.contract == LEGACY_CONTRACT;
     // A request is one header plus FIN, never a client-supplied body.
     ensure!(
         timeout(DEADLINE, recv.read_to_end(0)).await??.is_empty(),
@@ -445,7 +450,11 @@ async fn owner_request(
                         let body = limited_body(response, MAX_HEADER).await?;
                         return send_reply(&mut send, status, "text/plain", error, &body).await;
                     }
-                    write_json(&mut send, &Reply { status, content_type:"video/mp2t".into(), tuner_error: error }).await?;
+                    let resource = response.headers().get("X-HDHomeRun-Resource").and_then(|v| v.to_str().ok())
+                        .filter(|value| value.strip_prefix("tuner").and_then(|v| v.parse::<u8>().ok()).is_some_and(|n| n < owner.tuners))
+                        .map(str::to_owned);
+                    let resource = if legacy { None } else { resource };
+                    write_json(&mut send, &Reply { status, content_type:"video/mpeg".into(), tuner_error: error, resource }).await?;
                     while let Some(chunk) = response.chunk().await? {
                         // One upstream chunk at a time; QUIC's send window provides backpressure.
                         timeout(DEADLINE, send.write_all(&chunk)).await??;
@@ -626,6 +635,22 @@ fn response(status: u16, content_type: &str, body: impl Into<Body>) -> Result<Re
         .body(body.into())?)
 }
 
+fn native_media_response(response: &mut Response) {
+    // Hyper chunks unknown-length HTTP/1.1 bodies even with Connection: close.
+    // HTTP/1.0 explicitly selects close-delimited framing without a fake length
+    // or manual socket writes. SDK clients receive raw MPEG-TS immediately
+    // after the headers, matching the device's body format.
+    *response.version_mut() = Version::HTTP_10;
+    let headers = response.headers_mut();
+    headers.insert("Connection", "close".parse().expect("static header"));
+    headers.insert("Content-Type", "video/mpeg".parse().expect("static header"));
+    headers.insert(
+        "transferMode.dlna.org",
+        "Streaming".parse().expect("static header"),
+    );
+    headers.remove("Transfer-Encoding");
+}
+
 // Explicit STOP_SENDING when the HTTP body is dropped releases upstream tuning.
 struct MediaBody {
     recv: quinn::RecvStream,
@@ -693,9 +718,14 @@ async fn handle(
             let operation = Operation::Stream { channel: channel.into(), tuner, duration };
             operation.stream_path(catalog.identity()?.1)?;
             ensure!(catalog.channels.iter().any(|c| c["GuideNumber"].as_str() == Some(channel)), "channel unavailable");
-            if method == Method::HEAD { return response(200, "video/mp2t", Body::empty()); }
+            if method == Method::HEAD {
+                let mut result = response(200, "video/mpeg", Body::empty())?;
+                native_media_response(&mut result);
+                return Ok(result);
+            }
             operation
         };
+        let media = matches!(operation, Operation::Stream { .. });
         let (reply, recv) = proxy.request(operation).await?;
         let stream = futures_util::stream::try_unfold(MediaBody { recv, _permit: permit }, |mut state| async move {
             let chunk = timeout(DEADLINE, state.recv.read_chunk(64 * 1024, true)).await??;
@@ -704,6 +734,12 @@ async fn handle(
         let mut response = response(reply.status, &reply.content_type, Body::from_stream(stream))?;
         if let Some(error) = reply.tuner_error {
             response.headers_mut().insert("X-HDHomeRun-Error", error.parse()?);
+        }
+        if media && reply.status == 200 {
+            native_media_response(&mut response);
+            if let Some(resource) = reply.resource {
+                response.headers_mut().insert("X-HDHomeRun-Resource", resource.parse()?);
+            }
         }
         Ok(response)
     }.await;
@@ -723,18 +759,27 @@ async fn handle(
     if matches!(client.ip(), IpAddr::V4(ip) if proxy.lan.contains(&ip)) {
         apply_cors(&mut reply, &headers, &proxy.web_origins);
     }
-    if !uri.path().starts_with("/auto/")
-        && !uri.path().starts_with("/tuner")
-        && uri.path() != "/healthz"
-    {
+    if uri.path() != "/healthz" {
         let origin = headers
             .get("Origin")
             .and_then(|v| v.to_str().ok())
             .filter(|v| v.len() <= 256);
         eprintln!(
-            "HDHomeRun HTTP client={client} method={method} path={:?} origin={origin:?} status={} cors_allowed={}",
+            "HDHomeRun HTTP client={client} method={method} path={:?} query_keys={:?} origin={origin:?} status={} version={:?} cors_allowed={}",
             uri.path().chars().take(128).collect::<String>(),
+            uri.query().map(|q| q
+                .split('&')
+                .take(8)
+                .map(|pair| pair
+                    .split('=')
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(32)
+                    .collect::<String>())
+                .collect::<Vec<_>>()),
             reply.status(),
+            reply.version(),
             cors_origin(&headers, &proxy.web_origins).is_some()
         );
     }
@@ -940,7 +985,10 @@ mod tests {
                     let mut bytes = vec![0u8;188]; bytes[0] = 0x47;
                     Some((Ok::<_, std::io::Error>(Bytes::from(bytes)), guard))
                 });
-                response(200, "video/mp2t", Body::from_stream(stream)).unwrap()
+                let mut result = response(200, "video/mpeg", Body::from_stream(stream)).unwrap();
+                result.headers_mut().insert("X-HDHomeRun-Resource", "tuner0".parse().unwrap());
+                native_media_response(&mut result);
+                result
             }
             _ => response(404, "text/plain", "not found").unwrap(),
         }
@@ -1105,6 +1153,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(first.status(), 200);
+        assert_eq!(first.version(), Version::HTTP_10);
+        assert_eq!(first.headers()["Content-Type"], "video/mpeg");
+        assert_eq!(first.headers()["X-HDHomeRun-Resource"], "tuner0");
+        assert!(first.headers().get("Transfer-Encoding").is_none());
         let packet = first.chunk().await.unwrap().unwrap();
         assert_eq!(packet[0], 0x47);
         let mut second = client
@@ -1127,6 +1179,65 @@ mod tests {
         wait_active(&active, 2).await;
         drop(first);
         drop(second);
+        wait_active(&active, 0).await;
+        // Do not let an HTTP client silently dechunk and hide the wire format.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        socket
+            .write_all(format!("GET /auto/v4.1 HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut raw = Vec::new();
+        let split = timeout(Duration::from_secs(3), async {
+            loop {
+                let mut bytes = [0; 2048];
+                let count = socket.read(&mut bytes).await.unwrap();
+                assert_ne!(count, 0);
+                raw.extend_from_slice(&bytes[..count]);
+                assert!(raw.len() < 64 * 1024);
+                if let Some(split) = raw.windows(4).position(|v| v == b"\r\n\r\n")
+                    && raw.len() >= split + 4 + 188
+                {
+                    break split + 4;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let headers = String::from_utf8_lossy(&raw[..split]).to_ascii_lowercase();
+        assert!(headers.starts_with("http/1.0 200"));
+        assert!(headers.contains("connection: close\r\n"));
+        assert!(headers.contains("content-type: video/mpeg\r\n"));
+        assert!(!headers.contains("transfer-encoding") && !headers.contains("content-length"));
+        assert_eq!(
+            raw[split], 0x47,
+            "raw body must start with MPEG-TS, not chunk framing"
+        );
+        drop(socket);
+        wait_active(&active, 0).await;
+
+        // Upgrade owners first: v1 clients still receive exactly their old header schema.
+        let peer = proxy.peer().await.unwrap();
+        let (mut send, mut recv) = peer.connection().open_bi().await.unwrap();
+        write_json(
+            &mut send,
+            &Request {
+                contract: LEGACY_CONTRACT.into(),
+                operation: Operation::Stream {
+                    channel: "4.1".into(),
+                    tuner: None,
+                    duration: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        send.finish().unwrap();
+        let legacy_reply: Value = read_json(&mut recv).await.unwrap();
+        assert_eq!(legacy_reply["status"], 200);
+        assert!(legacy_reply.get("resource").is_none());
+        recv.stop(0u32.into()).unwrap();
+        drop(recv);
         wait_active(&active, 0).await;
         let (reply, recv) = proxy
             .request(Operation::Stream {

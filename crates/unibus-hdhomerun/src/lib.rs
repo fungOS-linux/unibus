@@ -8,7 +8,8 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-pub const CONTRACT: &str = "unibus.hdhomerun.request.v1";
+pub const CONTRACT: &str = "unibus.hdhomerun.request.v2";
+pub const LEGACY_CONTRACT: &str = "unibus.hdhomerun.request.v1";
 pub const MAX_METADATA: usize = 1024 * 1024;
 pub const MAX_HEADER: usize = 4096;
 
@@ -71,6 +72,9 @@ pub struct Reply {
     pub status: u16,
     pub content_type: String,
     pub tuner_error: Option<String>,
+    /// Physical allocation reported by the tuner, never a fabricated proxy ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
