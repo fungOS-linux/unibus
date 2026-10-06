@@ -1,0 +1,13 @@
+{
+  "installation_id": "home",
+  "producer_id": "fix-market-edge",
+  "hub_endpoint": "127.0.0.1:18790",
+  "token_env": "UNIBUS_FIX_TOKEN",
+  "zones": ["default"],
+  "capabilities": ["market.fix"],
+  "screen_anchors": [],
+  "schema_version": 2,
+  "source": { "mode": "stdin" },
+  "default_venue": "XNAS",
+  "depth": 10
+}
