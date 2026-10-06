@@ -12,6 +12,7 @@ pub const CONTRACT: &str = "unibus.hdhomerun.request.v2";
 pub const LEGACY_CONTRACT: &str = "unibus.hdhomerun.request.v1";
 pub const MAX_METADATA: usize = 1024 * 1024;
 pub const MAX_HEADER: usize = 4096;
+pub const IO_DEADLINE_MS: u64 = 10_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
@@ -85,6 +86,147 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    /// Non-secret inventory derived from the current physical tuner catalog.
+    /// Owner and presenter references are explicit, transport-neutral identities.
+    pub fn service_catalog(
+        &self,
+        owner_reference: &str,
+        presenter_reference: &str,
+        observed_at_unix_ms: u64,
+        valid_until_unix_ms: u64,
+    ) -> Result<stream_descriptors::service::ServiceCatalog> {
+        use stream_descriptors::service::{
+            SERVICE_CATALOG_KIND, ServiceCatalog, ServiceOperation, ServiceResource,
+        };
+        let (device, _) = self.identity()?;
+        let service_id = format!("hdhomerun.{device:08X}");
+        let mut resources = vec![ServiceResource {
+            id: service_id.clone(),
+            kind: "tv.tuner".into(),
+            display_name: format!("HDHomeRun {device:08X}"),
+            stream_ids: vec![],
+            operations: vec![ServiceOperation {
+                id: "lineup_status".into(),
+                request_kind: CONTRACT.into(),
+                requires: "hdhomerun.catalog.read".into(),
+            }],
+        }];
+        for channel in self
+            .channels
+            .iter()
+            .filter(|channel| !is_protected(channel))
+        {
+            let number = channel["GuideNumber"].as_str().context("missing channel")?;
+            let resource_id = format!("{service_id}.channel.{number}");
+            resources.push(ServiceResource {
+                id: resource_id.clone(),
+                kind: "tv.channel".into(),
+                display_name: channel["GuideName"]
+                    .as_str()
+                    .context("missing name")?
+                    .into(),
+                stream_ids: vec![format!("{resource_id}.mpegts")],
+                operations: vec![ServiceOperation {
+                    id: "stream".into(),
+                    request_kind: CONTRACT.into(),
+                    requires: "hdhomerun.stream.consume".into(),
+                }],
+            });
+        }
+        let catalog = ServiceCatalog {
+            contract: SERVICE_CATALOG_KIND.into(),
+            service_id,
+            adapter_kind: "hdhomerun".into(),
+            owner_reference: owner_reference.into(),
+            presenter_reference: presenter_reference.into(),
+            observed_at_unix_ms,
+            valid_until_unix_ms,
+            resources,
+        };
+        catalog.validate().map_err(anyhow::Error::msg)?;
+        Ok(catalog)
+    }
+
+    /// Existing v2 contracts, not a new media protocol. Endpoint references are
+    /// resolved by the HDHomeRun adapter to its scoped native HTTP stream.
+    pub fn stream_descriptors(
+        &self,
+        observed_at_unix_ms: u64,
+        valid_until_unix_ms: u64,
+    ) -> Result<
+        Vec<(
+            stream_descriptors::StreamDescriptorV2,
+            stream_descriptors::EndpointAnnouncementV2,
+        )>,
+    > {
+        use stream_descriptors::*;
+        let (device, _) = self.identity()?;
+        let mut streams = Vec::new();
+        for channel in self
+            .channels
+            .iter()
+            .filter(|channel| !is_protected(channel))
+        {
+            let number = channel["GuideNumber"].as_str().context("missing channel")?;
+            let resource = format!("hdhomerun.{device:08X}.channel.{number}");
+            let stream_id = format!("{resource}.mpegts");
+            let provenance = ProvenanceFacet {
+                producer: "unibus-hdhomerun".into(),
+                calibration: None,
+                algorithm: None,
+                transform: None,
+            };
+            let descriptor = StreamDescriptorV2 {
+                schema_version: V2_SCHEMA_VERSION,
+                stream_id: stream_id.clone(),
+                source_resource: resource.clone(),
+                semantic: SemanticFacet {
+                    kind: "tv.broadcast".into(),
+                    dimensions: Default::default(),
+                },
+                payload: Some(PayloadContract {
+                    contract: "mpeg.transport-stream".into(),
+                    maximum_bytes: None,
+                }),
+                observation: None,
+                encoding: Some(EncodingFacet {
+                    kind: "mpeg-ts".into(),
+                    parameters: Default::default(),
+                }),
+                clock: None,
+                media: None,
+                delivery: DeliveryFacet {
+                    class: DeliveryClass::Stream,
+                    maximum_age_ms: Some(IO_DEADLINE_MS),
+                    coalescing: None,
+                },
+                required_consumer_capabilities: vec!["hdhomerun.stream.consume".into()],
+                provenance: provenance.clone(),
+            };
+            let endpoints = EndpointAnnouncementV2 {
+                schema_version: V2_SCHEMA_VERSION,
+                stream_id,
+                generation: None,
+                bindings: vec![EndpointBindingV2 {
+                    transport: "http".into(),
+                    profile: "hdhomerun-mpegts".into(),
+                    role: ConnectionRole::Listener,
+                    endpoint_reference: resource,
+                    requires: "hdhomerun.stream.consume".into(),
+                }],
+                observed_at_unix_ms,
+                valid_until_unix_ms,
+                provenance,
+            };
+            descriptor.validate().map_err(anyhow::Error::msg)?;
+            endpoints
+                .validate(observed_at_unix_ms)
+                .map_err(anyhow::Error::msg)?;
+            streams.push((descriptor, endpoints));
+        }
+        Ok(streams)
+    }
+
     pub fn identity(&self) -> Result<(u32, u8)> {
         let id = self
             .device
@@ -175,10 +317,13 @@ pub fn is_protected(channel: &Map<String, Value>) -> bool {
     channel
         .get("DRM")
         .is_some_and(|v| v.as_u64().is_some_and(|n| n != 0) || v.as_bool() == Some(true))
-        || channel
-            .get("Tags")
-            .and_then(Value::as_array)
-            .is_some_and(|tags| tags.iter().any(|tag| tag.as_str() == Some("drm")))
+        || channel.get("Tags").is_some_and(|tags| {
+            tags.as_array()
+                .is_some_and(|tags| tags.iter().any(|tag| tag.as_str() == Some("drm")))
+                || tags
+                    .as_str()
+                    .is_some_and(|tags| tags.split(',').any(|tag| tag.trim() == "drm"))
+        })
 }
 
 pub fn playlist(catalog: &Catalog) -> String {
@@ -290,5 +435,35 @@ mod tests {
         catalog.channels.pop();
         catalog.device.insert("TunerCount".into(), 0.into());
         assert!(catalog.identity().is_err());
+    }
+
+    #[test]
+    fn service_inventory_reuses_v2_streams_without_secrets_or_protected_channels() {
+        let catalog = fixture();
+        let inventory = catalog
+            .service_catalog("tls/owner.internal", "lan/pi/8088", 100, 200)
+            .unwrap();
+        assert_eq!(inventory.resources.len(), 2);
+        assert!(inventory.is_current(150));
+        assert!(!inventory.is_current(200));
+        let json = serde_json::to_string(&inventory).unwrap();
+        assert!(!json.contains("DeviceAuth"));
+        assert!(!json.contains("private"));
+        let streams = catalog.stream_descriptors(100, 200).unwrap();
+        assert_eq!(streams.len(), 1);
+        assert_eq!(inventory.resources[1].stream_ids[0], streams[0].0.stream_id);
+        assert_eq!(streams[0].0.source_resource, inventory.resources[1].id);
+        let mut protected = catalog.clone();
+        protected.channels[0].insert("Tags".into(), "hd, drm".into());
+        assert!(is_protected(&protected.channels[0]));
+        assert!(protected.stream_descriptors(100, 200).unwrap().is_empty());
+        assert_eq!(
+            protected
+                .service_catalog("owner", "proxy", 100, 200)
+                .unwrap()
+                .resources
+                .len(),
+            1
+        );
     }
 }

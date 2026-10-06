@@ -18,6 +18,7 @@ bytes = "1"
 futures-util = "0.3"
 ipnet = { version = "2", features = ["serde"] }
 crc32fast = "1"
+stream-descriptors = { path = "../stream-descriptors" }
 
 [dev-dependencies]
 rcgen = "0.14"

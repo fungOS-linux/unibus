@@ -1,0 +1,13 @@
+[package]
+name = "unibus-services"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Explicit-source service catalog and health inspector"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+stream-descriptors = { path = "../stream-descriptors" }

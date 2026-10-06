@@ -2,7 +2,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, ensure};
@@ -32,7 +32,7 @@ use crate::{
     discovery, is_protected, lineup_xml, playlist,
 };
 
-const DEADLINE: Duration = Duration::from_secs(10);
+const DEADLINE: Duration = Duration::from_millis(crate::IO_DEADLINE_MS);
 const STALE: Duration = Duration::from_secs(75);
 
 #[derive(Clone, Deserialize)]
@@ -543,6 +543,14 @@ pub async fn run_owner(
 struct Snapshot {
     catalog: Catalog,
     observed: Instant,
+    observed_at_unix_ms: u64,
+}
+
+fn unix_ms() -> Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
+        .as_millis()
+        .try_into()?)
 }
 
 pub struct Proxy {
@@ -612,6 +620,7 @@ impl Proxy {
         *self.snapshot.write().await = Some(Snapshot {
             catalog,
             observed: Instant::now(),
+            observed_at_unix_ms: unix_ms()?,
         });
         Ok(())
     }
@@ -633,6 +642,15 @@ fn response(status: u16, content_type: &str, body: impl Into<Body>) -> Result<Re
         .header("Content-Type", content_type)
         .header("Cache-Control", "no-store")
         .body(body.into())?)
+}
+
+fn service_response(status: u16, document: &impl Serialize) -> Result<Response> {
+    let body = serde_json::to_vec(document)?;
+    ensure!(
+        body.len() <= MAX_METADATA,
+        "service projection exceeds metadata budget"
+    );
+    response(status, "application/json", body)
 }
 
 fn native_media_response(response: &mut Response) {
@@ -684,6 +702,45 @@ async fn handle(
             Err(_) => return response(503, "text/plain", "Proxy request limit reached\n"),
         };
         let path = uri.path();
+        if matches!(path, "/v1/catalog" | "/v1/health" | "/v1/streams") {
+            use stream_descriptors::service::{HealthState, SERVICE_HEALTH_KIND, ServiceHealth};
+            ensure!(uri.query().is_none(), "unsupported service query");
+            let now = unix_ms()?;
+            let snapshot = proxy.snapshot.read().await;
+            let Some(snapshot) = snapshot.as_ref() else {
+                return response(503, "text/plain", "No authenticated tuner observation\n");
+            };
+            let (device, _) = snapshot.catalog.identity()?;
+            let service_id = format!("hdhomerun.{device:08X}");
+            let observed = snapshot.observed_at_unix_ms;
+            let until = observed.checked_add(STALE.as_millis().try_into()?).context("lease overflow")?;
+            let stale = snapshot.observed.elapsed() >= STALE || now < observed || now >= until;
+            if path == "/v1/health" {
+                let health = ServiceHealth {
+                    contract: SERVICE_HEALTH_KIND.into(), service_id,
+                    state: if stale { HealthState::Stale } else { HealthState::Healthy },
+                    reason: stale.then(|| "catalog_expired".into()),
+                    observed_at_unix_ms: observed, valid_until_unix_ms: until,
+                };
+                health.validate().map_err(anyhow::Error::msg)?;
+                return service_response(if stale {503} else {200}, &health);
+            }
+            // Never renew stale evidence merely because a consumer reads it.
+            if stale { return response(503, "text/plain", "Tuner catalog is stale\n"); }
+            if path == "/v1/streams" {
+                let streams = snapshot.catalog.stream_descriptors(observed, until)?;
+                let documents: Vec<_> = streams.into_iter().map(|(descriptor, endpoints)| {
+                    serde_json::json!({"descriptor": descriptor, "endpoints": endpoints})
+                }).collect();
+                return service_response(200, &documents);
+            }
+            let catalog = snapshot.catalog.service_catalog(
+                &format!("tls/{}", proxy.server_name),
+                &format!("lan/{}", proxy.base.trim_start_matches("http://").replace(':', "/")),
+                observed, until,
+            )?;
+            return service_response(200, &catalog);
+        }
         if path == "/healthz" {
             let snapshot = proxy.snapshot.read().await;
             let age = snapshot.as_ref().map(|s| s.observed.elapsed().as_secs());
@@ -1073,6 +1130,48 @@ mod tests {
         );
         let client = http_client().unwrap();
         let base = format!("http://{address}");
+        let inventory: stream_descriptors::service::ServiceCatalog = client
+            .get(format!("{base}/v1/catalog"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        inventory.validate().unwrap();
+        assert_eq!(inventory.resources.len(), 2);
+        assert!(inventory.owner_reference.starts_with("tls/"));
+        let health: stream_descriptors::service::ServiceHealth = client
+            .get(format!("{base}/v1/health"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            health.effective_state(unix_ms().unwrap()),
+            stream_descriptors::service::HealthState::Healthy
+        );
+        let streams: Value = client
+            .get(format!("{base}/v1/streams"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            streams[0]["descriptor"]["stream_id"],
+            inventory.resources[1].stream_ids[0]
+        );
+        assert!(streams.to_string().find("DeviceAuth").is_none());
         let device: Value = client
             .get(format!("{base}/discover.json"))
             .send()
@@ -1295,6 +1394,31 @@ mod tests {
         assert!(proxy.catalog().await.is_err());
         let health = client.get(format!("{base}/healthz")).send().await.unwrap();
         assert_eq!(health.status(), 503);
+        let stale = client
+            .get(format!("{base}/v1/health"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), 503);
+        assert_eq!(stale.json::<Value>().await.unwrap()["state"], "stale");
+        assert_eq!(
+            client
+                .get(format!("{base}/v1/catalog"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            503
+        );
+        assert_eq!(
+            client
+                .get(format!("{base}/v1/streams"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            503
+        );
         client_udp.send_to(&request, udp_address).await.unwrap();
         assert!(
             timeout(Duration::from_millis(100), client_udp.recv_from(&mut bytes))

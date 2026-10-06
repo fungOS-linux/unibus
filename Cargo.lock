@@ -2730,6 +2730,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "stream-descriptors",
  "tempfile",
  "tokio",
  "unibus-quic",
@@ -2914,6 +2915,17 @@ dependencies = [
  "serde_json",
  "tempfile",
  "unibus",
+]
+
+[[package]]
+name = "unibus-services"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "stream-descriptors",
 ]
 
 [[package]]
