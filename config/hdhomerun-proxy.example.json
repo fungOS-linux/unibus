@@ -7,7 +7,7 @@
   "http_port": 8088,
   "stream_port": 5004,
   "share_device_auth": true,
-  "web_origins": ["https://my.hdhomerun.com", "http://my.hdhomerun.com", "null"],
+  "web_origins": ["https://my.hdhomerun.com", "http://my.hdhomerun.com", "https://appassets.androidplatform.net", "null"],
   "identity": {
     "ca_file": "/home/ajmwagar/.config/unibus-hdhomerun/ca.pem",
     "cert_file": "/home/ajmwagar/.config/unibus-hdhomerun/peer.pem",

@@ -44,7 +44,9 @@ Browser-based app UIs also need CORS: the real tuner returns
 `Access-Control-Allow-Origin`, and discovery succeeding does not establish
 that the app can fetch `/discover.json`. Configure `web_origins` as exact
 origins. The example permits SiliconDust's `my.hdhomerun.com` HTTP/HTTPS UI
-and the opaque `null` origin used by embedded/file-based webviews. An empty
+the Android asset-loader origin `https://appassets.androidplatform.net`
+(observed in the FireTV's actual requests), and the opaque `null` origin used
+by embedded/file-based webviews. An empty
 list (the default) grants no cross-origin access; wildcard origins are rejected.
 Allowing `null` also trusts other opaque-origin clients on the permitted LAN,
 so omit it if it is not needed. DeviceAuth remains sensitive regardless of CORS.
