@@ -1,0 +1,18 @@
+[package]
+name = "unibus-ipfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bounded CID-only retrieval through a local Kubo node"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+unibus.workspace = true
+cid = "0.11"
+tempfile.workspace = true
+
+[dev-dependencies]
+unibus-router = { path = "../unibus-router" }

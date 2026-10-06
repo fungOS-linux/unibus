@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/unibus", "crates/unibus-dcp", "crates/unibus-device", "crates/unibus-fix", "crates/unibus-input", "crates/unibus-mcp", "crates/unibus-media", "crates/unibus-midi", "crates/unibus-mqtt", "crates/unibus-mycelium", "crates/unibus-qemu", "crates/unibus-quic", "crates/unibus-recording", "crates/unibus-router", "crates/stream-descriptors", "crates/unibus-sdk", "crates/unibus-lua", "crates/unibus-ffi", "crates/unibus-adb", "crates/unibus-bambu", "crates/unibus-plugin", "crates/unibus-hdhomerun", "crates/unibus-services"]
+members = ["crates/unibus", "crates/unibus-dcp", "crates/unibus-device", "crates/unibus-fix", "crates/unibus-input", "crates/unibus-mcp", "crates/unibus-media", "crates/unibus-midi", "crates/unibus-mqtt", "crates/unibus-mycelium", "crates/unibus-qemu", "crates/unibus-quic", "crates/unibus-recording", "crates/unibus-router", "crates/stream-descriptors", "crates/unibus-sdk", "crates/unibus-lua", "crates/unibus-ffi", "crates/unibus-adb", "crates/unibus-bambu", "crates/unibus-plugin", "crates/unibus-hdhomerun", "crates/unibus-services", "crates/unibus-ipfs"]
 resolver = "2"
 
 [workspace.package]

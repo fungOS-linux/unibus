@@ -1,0 +1,14 @@
+{
+  "client": {
+    "installation_id": "lab",
+    "producer_id": "ipfs.agora-one",
+    "hub_endpoint": "127.0.0.1:18790",
+    "token_file": "/run/secrets/unibus-ipfs-token",
+    "zones": ["lab"],
+    "capabilities": ["ipfs.fetch"],
+    "schema_version": 2,
+    "read_timeout_ms": 100
+  },
+  "kubo_rpc": "http://127.0.0.1:5001",
+  "allowed_producers": ["canvas.pdf-reader"]
+}
