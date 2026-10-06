@@ -1,0 +1,23 @@
+# Deployment-only UDP relay: does not terminate TLS or bridge network discovery.
+# Adjust the explicit addresses if host placement changes. Requires socat.
+[Unit]
+Description=Private HDHomeRun QUIC packet relay for home-pi
+Wants=network-online.target
+After=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+DynamicUser=yes
+ExecStart=/usr/bin/socat -T 30 UDP4-LISTEN:18504,bind=192.168.2.67,reuseaddr,fork,max-children=2,range=192.168.2.74/32 UDP4:100.85.154.96:18504
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+MemoryMax=32M
+TasksMax=8
+
+[Install]
+WantedBy=multi-user.target

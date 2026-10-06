@@ -1,0 +1,16 @@
+{
+  "role": "proxy",
+  "owner": "192.168.2.67:18504",
+  "owner_server_name": "hdhomerun-owner.internal",
+  "lan_ip": "192.168.2.74",
+  "allowed_lan": "192.168.2.0/24",
+  "http_port": 8088,
+  "stream_port": 5004,
+  "share_device_auth": true,
+  "identity": {
+    "ca_file": "/home/ajmwagar/.config/unibus-hdhomerun/ca.pem",
+    "cert_file": "/home/ajmwagar/.config/unibus-hdhomerun/peer.pem",
+    "key_file": "/home/ajmwagar/.config/unibus-hdhomerun/peer.key",
+    "allowed_peer_bindings": ["sha256:REPLACE_WITH_AVERY_CERTIFICATE_SHA256"]
+  }
+}

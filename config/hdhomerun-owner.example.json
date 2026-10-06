@@ -1,0 +1,11 @@
+{
+  "role": "owner",
+  "listen": "100.85.154.96:18504",
+  "tuner_ip": "192.168.0.208",
+  "identity": {
+    "ca_file": "/run/credentials/unibus-hdhomerun-owner.service/ca.pem",
+    "cert_file": "/run/credentials/unibus-hdhomerun-owner.service/peer.pem",
+    "key_file": "/run/credentials/unibus-hdhomerun-owner.service/peer.key",
+    "allowed_peer_bindings": ["sha256:REPLACE_WITH_HOME_PI_CERTIFICATE_SHA256"]
+  }
+}
