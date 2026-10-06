@@ -40,6 +40,23 @@ Playback: `http://192.168.2.74:5004/auto/v4.1` (KOMO). Explicit
 allocate a tuner. Unsupported methods, path injection, and arbitrary targets
 are rejected. This is not an open HTTP proxy.
 
+Browser-based app UIs also need CORS: the real tuner returns
+`Access-Control-Allow-Origin`, and discovery succeeding does not establish
+that the app can fetch `/discover.json`. Configure `web_origins` as exact
+origins. The example permits SiliconDust's `my.hdhomerun.com` HTTP/HTTPS UI
+and the opaque `null` origin used by embedded/file-based webviews. An empty
+list (the default) grants no cross-origin access; wildcard origins are rejected.
+Allowing `null` also trusts other opaque-origin clients on the permitted LAN,
+so omit it if it is not needed. DeviceAuth remains sensitive regardless of CORS.
+Allowed origins get GET/HEAD preflight support, including private-network
+preflights; POST is still denied. The LAN CIDR restriction applies before CORS,
+including OPTIONS. Native non-browser clients are unaffected.
+
+Metadata request diagnostics report source IP, method, bounded path/origin,
+status, and whether CORS matched. They never log DeviceAuth, response payloads,
+private keys, or query strings. A denied/unrecognized app origin is visible
+without widening access to every website.
+
 Protected channels are omitted and rejected; no DRM bypass, transcoding,
 device firmware updates, TCP 65001 get/set, DLNA/SSDP emulation, DVR/storage,
 channel rescan, or favorites mutation is implemented. **Stock FireTV app

@@ -10,7 +10,7 @@ use axum::{
     Router,
     body::Body,
     extract::{ConnectInfo, State},
-    http::{Method, Uri},
+    http::{HeaderMap, Method, Uri},
     response::Response,
     routing::any,
 };
@@ -96,6 +96,8 @@ pub enum Config {
         stream_port: u16,
         #[serde(default)]
         share_device_auth: bool,
+        #[serde(default)]
+        web_origins: Vec<String>,
         identity: Identity,
     },
 }
@@ -148,6 +150,7 @@ impl Config {
                 http_port,
                 stream_port,
                 identity,
+                web_origins,
                 ..
             } => {
                 ensure!(
@@ -167,10 +170,75 @@ impl Config {
                     "explicit, bounded LAN allowlist required"
                 );
                 ensure!(*http_port != 0 && *stream_port != 0, "HTTP ports required");
+                ensure!(web_origins.len() <= 16, "too many web origins");
+                for origin in web_origins {
+                    ensure!(
+                        valid_origin(origin),
+                        "web origins must be exact HTTP(S) origins or null; wildcards are not allowed"
+                    );
+                }
                 identity.credentials()?;
             }
         }
         Ok(())
+    }
+}
+
+fn valid_origin(origin: &str) -> bool {
+    if origin == "null" {
+        return true;
+    }
+    if origin.len() > 256 || origin.contains('*') {
+        return false;
+    }
+    reqwest::Url::parse(origin).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https") && url.origin().ascii_serialization() == origin
+    })
+}
+
+fn cors_origin<'a>(headers: &'a HeaderMap, allowed: &[String]) -> Option<&'a str> {
+    let origin = headers.get("Origin")?.to_str().ok()?;
+    allowed
+        .iter()
+        .any(|allowed| allowed == origin)
+        .then_some(origin)
+}
+
+fn apply_cors(response: &mut Response, headers: &HeaderMap, allowed: &[String]) {
+    response
+        .headers_mut()
+        .insert("Vary", "Origin".parse().expect("static header"));
+    if let Some(origin) = cors_origin(headers, allowed) {
+        let target = response.headers_mut();
+        target.insert(
+            "Access-Control-Allow-Origin",
+            origin.parse().expect("validated request header"),
+        );
+        target.insert(
+            "Access-Control-Allow-Methods",
+            "GET, HEAD, OPTIONS".parse().expect("static header"),
+        );
+        target.insert(
+            "Access-Control-Allow-Headers",
+            "Accept, Content-Type, Range, Cache-Control"
+                .parse()
+                .expect("static header"),
+        );
+        target.insert(
+            "Access-Control-Expose-Headers",
+            "X-HDHomeRun-Error, Content-Type"
+                .parse()
+                .expect("static header"),
+        );
+        if headers
+            .get("Access-Control-Request-Private-Network")
+            .is_some_and(|v| v == "true")
+        {
+            target.insert(
+                "Access-Control-Allow-Private-Network",
+                "true".parse().expect("static header"),
+            );
+        }
     }
 }
 
@@ -478,6 +546,7 @@ pub struct Proxy {
     base: String,
     stream_base: String,
     share_auth: bool,
+    web_origins: Vec<String>,
     snapshot: RwLock<Option<Snapshot>>,
     requests: Arc<Semaphore>,
 }
@@ -573,9 +642,17 @@ async fn handle(
     ConnectInfo(client): ConnectInfo<SocketAddr>,
     method: Method,
     uri: Uri,
+    headers: HeaderMap,
 ) -> Response {
     let result = async {
         ensure!(matches!(client.ip(), IpAddr::V4(ip) if proxy.lan.contains(&ip)), "client outside permitted LAN");
+        if method == Method::OPTIONS {
+            if cors_origin(&headers, &proxy.web_origins).is_none() ||
+                !headers.get("Access-Control-Request-Method").is_some_and(|method| method == "GET" || method == "HEAD") {
+                return response(403, "text/plain", "Origin or method is not permitted\n");
+            }
+            return response(204, "text/plain", Body::empty());
+        }
         if method != Method::GET && method != Method::HEAD { return response(405, "text/plain", "Read-only tuner proxy\n"); }
         let permit = match proxy.requests.clone().try_acquire_owned() {
             Ok(permit) => permit,
@@ -630,7 +707,7 @@ async fn handle(
         }
         Ok(response)
     }.await;
-    match result {
+    let mut reply = match result {
         Ok(response) => response,
         Err(error) => {
             eprintln!("HDHomeRun LAN request failed: {error:#}");
@@ -642,7 +719,26 @@ async fn handle(
             )
             .expect("static error response")
         }
+    };
+    if matches!(client.ip(), IpAddr::V4(ip) if proxy.lan.contains(&ip)) {
+        apply_cors(&mut reply, &headers, &proxy.web_origins);
     }
+    if !uri.path().starts_with("/auto/")
+        && !uri.path().starts_with("/tuner")
+        && uri.path() != "/healthz"
+    {
+        let origin = headers
+            .get("Origin")
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| v.len() <= 256);
+        eprintln!(
+            "HDHomeRun HTTP client={client} method={method} path={:?} origin={origin:?} status={} cors_allowed={}",
+            uri.path().chars().take(128).collect::<String>(),
+            reply.status(),
+            cors_origin(&headers, &proxy.web_origins).is_some()
+        );
+    }
+    reply
 }
 
 async fn discovery_loop(proxy: Arc<Proxy>, socket: UdpSocket) -> Result<()> {
@@ -686,6 +782,7 @@ async fn proxy_state(config: Config) -> Result<(Arc<Proxy>, Ipv4Addr, u16, u16)>
         http_port,
         stream_port,
         share_device_auth,
+        web_origins,
         identity,
     } = config
     else {
@@ -718,6 +815,7 @@ async fn proxy_state(config: Config) -> Result<(Arc<Proxy>, Ipv4Addr, u16, u16)>
         base: format!("http://{lan_ip}:{http_port}"),
         stream_base: format!("http://{lan_ip}:{stream_port}"),
         share_auth: share_device_auth,
+        web_origins,
         snapshot: RwLock::new(None),
         requests: Arc::new(Semaphore::new(32)),
     });
@@ -886,6 +984,7 @@ mod tests {
             http_port: 8088,
             stream_port: 5004,
             share_device_auth: false,
+            web_origins: vec!["https://my.hdhomerun.com".into(), "null".into()],
             identity: proxy_identity.clone(),
         };
         config.validate().unwrap();
@@ -936,6 +1035,49 @@ mod tests {
             .unwrap();
         assert_eq!(device["DeviceID"], "10626E55");
         assert!(device.get("DeviceAuth").is_none());
+        for origin in ["https://my.hdhomerun.com", "null"] {
+            let result = client
+                .get(format!("{base}/discover.json"))
+                .header("Origin", origin)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(result.status(), 200);
+            assert_eq!(result.headers()["Access-Control-Allow-Origin"], origin);
+        }
+        let preflight = client
+            .request(Method::OPTIONS, format!("{base}/discover.json"))
+            .header("Origin", "https://my.hdhomerun.com")
+            .header("Access-Control-Request-Method", "GET")
+            .header("Access-Control-Request-Private-Network", "true")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(preflight.status(), 204);
+        assert_eq!(
+            preflight.headers()["Access-Control-Allow-Private-Network"],
+            "true"
+        );
+        let bad = client
+            .get(format!("{base}/discover.json"))
+            .header("Origin", "https://untrusted.example")
+            .send()
+            .await
+            .unwrap();
+        assert!(bad.headers().get("Access-Control-Allow-Origin").is_none());
+        for (origin, method) in [
+            ("https://untrusted.example", "GET"),
+            ("https://my.hdhomerun.com", "POST"),
+        ] {
+            let result = client
+                .request(Method::OPTIONS, format!("{base}/discover.json"))
+                .header("Origin", origin)
+                .header("Access-Control-Request-Method", method)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(result.status(), 403);
+        }
         let playlist = client
             .get(format!("{base}/lineup.m3u"))
             .send()
@@ -1013,9 +1155,16 @@ mod tests {
             ConnectInfo("192.168.99.1:1234".parse().unwrap()),
             Method::GET,
             "/discover.json".parse().unwrap(),
+            HeaderMap::new(),
         )
         .await;
         assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+        assert!(
+            forbidden
+                .headers()
+                .get("Access-Control-Allow-Origin")
+                .is_none()
+        );
         // Same trust store, wrong pinned peer: no catalog reaches the LAN.
         let mut wrong = proxy_identity.clone();
         wrong.allowed_peer_bindings = vec![format!("sha256:{}", "0".repeat(64))];
@@ -1027,6 +1176,7 @@ mod tests {
             http_port: 8088,
             stream_port: 5004,
             share_device_auth: false,
+            web_origins: vec![],
             identity: wrong,
         };
         assert!(proxy_state(invalid).await.is_err());
@@ -1059,6 +1209,23 @@ mod tests {
                 identity: identity.clone(),
             };
             assert!(config.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn web_origins_are_exact_and_bounded() {
+        for origin in ["https://my.hdhomerun.com", "http://localhost:8080", "null"] {
+            assert!(valid_origin(origin));
+        }
+        for origin in [
+            "*",
+            "https://*.example.com",
+            "https://example.com/path",
+            "file:///x",
+            "https://user:password@example.com",
+            "https://example.com?x=1",
+        ] {
+            assert!(!valid_origin(origin), "{origin}");
         }
     }
 }
