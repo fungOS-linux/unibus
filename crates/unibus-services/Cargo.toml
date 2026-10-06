@@ -11,3 +11,9 @@ serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
 stream-descriptors = { path = "../stream-descriptors" }
+unibus.workspace = true
+unibus-sdk = { path = "../unibus-sdk" }
+
+[dev-dependencies]
+tempfile.workspace = true
+unibus-router = { path = "../unibus-router" }

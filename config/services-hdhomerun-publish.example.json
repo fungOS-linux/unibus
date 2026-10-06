@@ -1,0 +1,20 @@
+{
+  "bus": {
+    "installation_id": "home",
+    "producer_id": "home-pi-services",
+    "hub_endpoint": "127.0.0.1:18790",
+    "token_file": "/home/ajmwagar/.config/unibus-services/publisher.token",
+    "zones": ["default"],
+    "capabilities": [],
+    "schema_version": 2
+  },
+  "source": "http://192.168.2.74:8088",
+  "bearer_token_file": null,
+  "binding": {
+    "producer_id": "home-pi-services",
+    "service_id": "hdhomerun.10626E55",
+    "owner_reference": "tls/hdhomerun-owner.internal",
+    "presenter_reference": "lan/192.168.2.74/8088"
+  },
+  "interval_ms": 5000
+}

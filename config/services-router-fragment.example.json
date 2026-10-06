@@ -1,0 +1,20 @@
+{
+  "routes": [
+    {"kind":"unibus.service.catalog.v1", "target":{"mode":"any_holder","name":"services.observe"}},
+    {"kind":"unibus.service.health.v1", "target":{"mode":"any_holder","name":"services.observe"}}
+  ],
+  "nodes": [
+    {
+      "producer_id":"home-pi-services",
+      "token_file":"/PRIVATE/publisher.token",
+      "zones":["default"], "capabilities":[],
+      "publishes":["unibus.service.catalog.v1","unibus.service.health.v1"]
+    },
+    {
+      "producer_id":"neo-services-observer",
+      "token_file":"/PRIVATE/neo-services-observer.token",
+      "zones":["default"], "capabilities":["services.observe"],
+      "publishes":[], "publish_producers":[]
+    }
+  ]
+}

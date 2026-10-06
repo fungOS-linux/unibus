@@ -2655,6 +2655,8 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
+ "sha2",
+ "stream-descriptors",
  "tempfile",
  "unibus",
  "unibus-router",
@@ -2926,6 +2928,10 @@ dependencies = [
  "serde",
  "serde_json",
  "stream-descriptors",
+ "tempfile",
+ "unibus",
+ "unibus-router",
+ "unibus-sdk",
 ]
 
 [[package]]

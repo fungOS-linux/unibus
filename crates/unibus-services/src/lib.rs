@@ -11,6 +11,8 @@ use reqwest::{Url, blocking::Client, redirect::Policy};
 use serde::{Serialize, de::DeserializeOwned};
 use stream_descriptors::service::{HealthState, ServiceCatalog, ServiceHealth};
 
+pub mod bus;
+
 const MAX_DOCUMENT: u64 = 1024 * 1024;
 
 #[derive(Debug, Serialize)]
@@ -67,8 +69,32 @@ fn document<T: DeserializeOwned>(client: &Client, base: &Url, path: &str) -> Res
 }
 
 pub fn inspect(source: &str) -> Result<Inspection> {
+    inspect_authorized(source, None)
+}
+
+/// Credentials remain local and are never part of inspection or bus documents.
+pub fn inspect_authorized(
+    source: &str,
+    bearer_token_file: Option<&std::path::Path>,
+) -> Result<Inspection> {
     let base = validate_source(source)?;
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Some(path) = bearer_token_file {
+        let mut token = String::new();
+        std::fs::File::open(path)?
+            .take(4097)
+            .read_to_string(&mut token)?;
+        ensure!(
+            token.len() <= 4096 && !token.trim().is_empty(),
+            "invalid local bearer credential"
+        );
+        let mut value =
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token.trim()))?;
+        value.set_sensitive(true);
+        headers.insert(reqwest::header::AUTHORIZATION, value);
+    }
     let client = Client::builder()
+        .default_headers(headers)
         .no_proxy()
         .redirect(Policy::none())
         .timeout(Duration::from_secs(5))

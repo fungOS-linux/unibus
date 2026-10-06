@@ -25,6 +25,99 @@ pub struct Inventory {
     pub devices: Vec<Device>,
 }
 impl Inventory {
+    /// Reuse smart-socket evidence; never probe USB independently or renew the
+    /// inventory lease just because another consumer reads the projection.
+    pub fn services(
+        &self,
+    ) -> Result<(
+        stream_descriptors::service::ServiceCatalog,
+        stream_descriptors::service::ServiceHealth,
+    )> {
+        use sha2::{Digest, Sha256};
+        use stream_descriptors::service::*;
+        self.validate(&self.producer_id, self.observed_at_unix_ms)?;
+        let service_id = format!("adb.{}", self.producer_id);
+        let reference = format!("producer/{}", self.producer_id);
+        let available = self.state == InventoryState::Available;
+        let mut resources = vec![ServiceResource {
+            id: service_id.clone(),
+            kind: "adb.server".into(),
+            display_name: "ADB smart-socket server".into(),
+            stream_ids: vec![],
+            operations: if available {
+                vec![ServiceOperation {
+                    id: "open".into(),
+                    request_kind: crate::KIND.into(),
+                    requires: "adb.socket".into(),
+                }]
+            } else {
+                vec![]
+            },
+        }];
+        for device in &self.devices {
+            let digest = Sha256::digest(device.serial.as_bytes());
+            resources.push(ServiceResource {
+                id: format!("adb.device.{digest:x}"),
+                kind: "adb.device".into(),
+                display_name: device
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| device.serial.clone()),
+                stream_ids: vec![],
+                // Device selection/authorization remains the native ADB server's
+                // responsibility. Offline/unauthorized devices expose no action.
+                operations: if device.state == "device" {
+                    vec![ServiceOperation {
+                        id: "open".into(),
+                        request_kind: crate::KIND.into(),
+                        requires: "adb.socket".into(),
+                    }]
+                } else {
+                    vec![]
+                },
+            });
+        }
+        let catalog = ServiceCatalog {
+            contract: SERVICE_CATALOG_KIND.into(),
+            service_id: service_id.clone(),
+            adapter_kind: "adb".into(),
+            owner_reference: reference.clone(),
+            presenter_reference: reference,
+            observed_at_unix_ms: self.observed_at_unix_ms,
+            valid_until_unix_ms: self.valid_until_unix_ms,
+            resources,
+        };
+        let (state, reason) = if !available {
+            (
+                HealthState::Disconnected,
+                Some("adb_server_unreachable".into()),
+            )
+        } else if !self.devices.is_empty()
+            && self
+                .devices
+                .iter()
+                .all(|device| device.state == "unauthorized")
+        {
+            (
+                HealthState::AuthenticationRequired,
+                Some("device_authorization_required".into()),
+            )
+        } else {
+            (HealthState::Healthy, None)
+        };
+        let health = ServiceHealth {
+            contract: SERVICE_HEALTH_KIND.into(),
+            service_id,
+            state,
+            reason,
+            observed_at_unix_ms: self.observed_at_unix_ms,
+            valid_until_unix_ms: self.valid_until_unix_ms,
+        };
+        catalog.validate().map_err(anyhow::Error::msg)?;
+        health.validate().map_err(anyhow::Error::msg)?;
+        Ok((catalog, health))
+    }
+
     pub fn validate(&self, producer: &str, now: u64) -> Result<()> {
         ensure!(
             self.schema_version == 1
@@ -159,5 +252,41 @@ mod tests {
         ahead.observed_at_unix_ms = 2101;
         ahead.valid_until_unix_ms = 8101;
         assert!(ahead.validate("studio-adb", 100).is_err());
+    }
+
+    #[test]
+    fn service_projection_preserves_lease_and_native_device_authorization() {
+        let mut inventory = Inventory {
+            schema_version: 1,
+            producer_id: "studio-adb".into(),
+            generation: 1,
+            observed_at_unix_ms: 100,
+            valid_until_unix_ms: 6100,
+            state: InventoryState::Available,
+            devices: parse_devices("USB123 device model:Phone\n192.0.2.1:5555 unauthorized\n")
+                .unwrap(),
+        };
+        let (catalog, health) = inventory.services().unwrap();
+        assert_eq!(catalog.resources.len(), 3);
+        assert_eq!(catalog.resources[1].operations.len(), 1);
+        assert!(catalog.resources[2].operations.is_empty());
+        assert_eq!(catalog.valid_until_unix_ms, 6100);
+        assert_eq!(
+            health.state,
+            stream_descriptors::service::HealthState::Healthy
+        );
+        inventory.devices.remove(0);
+        assert_eq!(
+            inventory.services().unwrap().1.state,
+            stream_descriptors::service::HealthState::AuthenticationRequired
+        );
+        inventory.state = InventoryState::Unavailable;
+        inventory.devices.clear();
+        let (catalog, health) = inventory.services().unwrap();
+        assert!(catalog.resources[0].operations.is_empty());
+        assert_eq!(
+            health.state,
+            stream_descriptors::service::HealthState::Disconnected
+        );
     }
 }

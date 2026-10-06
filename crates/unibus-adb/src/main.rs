@@ -38,6 +38,8 @@ enum Mode {
         adb_binary: Option<std::path::PathBuf>,
         #[serde(default = "enabled")]
         publish_inventory: bool,
+        #[serde(default)]
+        publish_services: bool,
     },
     Attach {
         listen: SocketAddr,
@@ -72,6 +74,23 @@ fn send(bus: &Client, peer: &str, packet: &Packet, payload: &[u8]) -> Result<()>
     envelope.ttl_ms = Some(10_000);
     envelope.payload_bytes = payload.len();
     bus.send(&envelope, payload)
+}
+
+fn publish_inventory_message(
+    bus: &Client,
+    pending: &std::sync::Mutex<std::collections::BTreeSet<String>>,
+    destination: Option<&str>,
+    kind: &str,
+    value: serde_json::Value,
+) -> Result<()> {
+    let envelope = bus.envelope(destination, Message::new(kind, value))?;
+    let mut guard = pending
+        .lock()
+        .map_err(|_| anyhow::anyhow!("inventory receipt mutex poisoned"))?;
+    ensure!(guard.len() < 128, "inventory receipt backlog full");
+    guard.insert(envelope.request_id.clone());
+    drop(guard);
+    bus.send(&envelope, &[])
 }
 fn start_session(bus: Arc<Client>, peer: String, id: String, socket: TcpStream) -> Result<Session> {
     socket.set_nodelay(true)?;
@@ -285,8 +304,14 @@ fn main() -> Result<()> {
             adb_endpoint,
             allowed_clients,
             adb_binary,
+            publish_inventory,
+            publish_services,
             ..
         } => {
+            ensure!(
+                !publish_services || (*publish_inventory && config.bus.schema_version == 2),
+                "service publication requires inventory polling and schema v2 grants"
+            );
             ensure!(
                 adb_endpoint.ip().is_loopback() && !allowed_clients.is_empty(),
                 "ADB backend must be loopback and clients explicitly allowed"
@@ -351,6 +376,7 @@ fn main() -> Result<()> {
         adb_endpoint,
         allowed_clients,
         publish_inventory: true,
+        publish_services,
         ..
     } = &config.mode
     {
@@ -358,6 +384,7 @@ fn main() -> Result<()> {
         let endpoint = *adb_endpoint;
         let clients = allowed_clients.clone();
         let pending = inventory_pending.clone();
+        let services = *publish_services;
         thread::Builder::new().name("adb-inventory".into()).spawn(move || {
             loop {
                 let now = unibus::envelope::now_ms();
@@ -370,14 +397,17 @@ fn main() -> Result<()> {
                         "valid_until_unix_ms":now+6000,"state":"unavailable","devices":[]}) }
                 };
                 for peer in &clients {
-                    let result = bus.envelope(Some(peer), Message::new(unibus_adb::inventory::INVENTORY_KIND, value.clone())).and_then(|e| {
-                        let mut guard = pending.lock().unwrap();
-                        ensure!(guard.len() < 128, "inventory receipt backlog full");
-                        guard.insert(e.request_id.clone());
-                        drop(guard);
-                        bus.send(&e, &[])
-                    });
+                    let result = publish_inventory_message(&bus, &pending, Some(peer), unibus_adb::inventory::INVENTORY_KIND, value.clone());
                     if let Err(error) = result { eprintln!("ADB inventory publish failed: {error:#}"); return; }
+                }
+                if services {
+                    let result = (|| -> Result<()> {
+                        let inventory: unibus_adb::inventory::Inventory = serde_json::from_value(value)?;
+                        let (catalog, health) = inventory.services()?;
+                        publish_inventory_message(&bus, &pending, None, stream_descriptors::service::SERVICE_CATALOG_KIND, serde_json::to_value(catalog)?)?;
+                        publish_inventory_message(&bus, &pending, None, stream_descriptors::service::SERVICE_HEALTH_KIND, serde_json::to_value(health)?)
+                    })();
+                    if let Err(error) = result { eprintln!("ADB service publication failed: {error:#}"); return; }
                 }
                 thread::sleep(Duration::from_secs(2));
             }

@@ -1,0 +1,20 @@
+[Unit]
+Description=Publish source-owned service inventory over Unibus
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/unibus-services publish %h/.config/unibus-services/publish.json
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+MemoryMax=128M
+TasksMax=32
+UMask=0077
+
+[Install]
+WantedBy=default.target

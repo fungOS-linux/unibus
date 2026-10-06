@@ -11,6 +11,8 @@ serde.workspace = true
 serde_json.workspace = true
 unibus.workspace = true
 unibus-router = { path = "../unibus-router" }
+stream-descriptors = { path = "../stream-descriptors" }
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1,0 +1,17 @@
+{
+  "bus": {
+    "installation_id": "home",
+    "producer_id": "neo-services-observer",
+    "hub_endpoint": "127.0.0.1:19790",
+    "token_file": "/PRIVATE/neo-services-observer.token",
+    "zones": ["default"],
+    "capabilities": ["services.observe"],
+    "schema_version": 2
+  },
+  "sources": [{
+    "producer_id": "home-pi-services",
+    "service_id": "hdhomerun.10626E55",
+    "owner_reference": "tls/hdhomerun-owner.internal",
+    "presenter_reference": "lan/192.168.2.74/8088"
+  }]
+}

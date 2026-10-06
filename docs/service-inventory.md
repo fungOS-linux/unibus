@@ -1,8 +1,9 @@
 # Service inventory and health
 
-Implemented first slice: shared L2 contracts in `stream-descriptors::service`,
-bounded consumer projection, and HDHomeRun read-only HTTP publication. This is
-not yet a fleet-wide router catalog or an automatic adapter supervisor.
+Implemented: shared L2 contracts in `stream-descriptors::service`, bounded
+consumer projection, source-scoped bus publication/watch, HDHomeRun HTTP,
+opt-in ADB publication, and Radioman's authenticated HTTP projection. This is
+not an automatic adapter supervisor or an L1 router-owned catalog database.
 
 The `unibus-services` inspector reads one explicitly selected private HTTP
 source. It bounds responses/timeouts, disables redirects/environment proxies,
@@ -82,13 +83,86 @@ stream references, real authenticated QUIC/HTTP catalog reads and stale expiry.
 Build artifacts only for deployment. A catalog-only change requires updating
 the proxy binary; the owner's private v2 protocol is unchanged.
 
+## Bus publication and fleet inspection
+
+`unibus-services publish CONFIG.json` probes one explicitly selected source
+and publishes the two snapshot kinds through `unibus-sdk`. HTTP bearer
+credentials may be supplied in `bearer_token_file`; tokens never enter a
+catalog, health document, or bus payload. The publisher checks expected
+service/owner/presenter identities before publishing. It requires router
+receipts, caps outstanding requests at 32, and stops on rejected grants,
+missing receipts, source failure, disconnect, or SDK overflow. No observers
+is an explicitly logged idle-demand state, not successful delivery or a
+reason to accumulate retries. A supervisor can restart after genuine failure.
+
+`unibus-services watch CONFIG.json DURATION_MS` reads only the configured
+producer/service bindings and emits a retained JSON view. Health received
+before catalog is buffered once per configured binding, capped at 256.
+Unselected producers are filtered; wrong provenance or malformed selected
+evidence fails loudly. Expiry is calculated locally, never renewed by reads.
+One service catalog per publisher contains that service's resource collection;
+do not multiplex unrelated service catalogs under one producer's snapshot key.
+
+Both bus modes require schema v2 and a loopback connection. Use an authenticated
+private tunnel for cross-host reads. The existing router owns routing,
+authentication and exact publish grants; consumers own retention. This is not
+automatic cross-hub replication or Mycelium topology gossip.
+
+Manual setup:
+
+1. Generate separate publisher and observer tokens privately using the existing
+   router provisioning workflow. Preserve mode 0600; never put token values in
+   examples, shell history, descriptors or logs.
+2. Merge `config/services-router-fragment.example.json` into the selected
+   router config, substituting local token paths. Validate the complete config
+   and preserve all existing nodes/routes. Observer grants permit inventory
+   reads only; no ADB/radio/media controls are granted.
+3. Copy and customize `services-hdhomerun-publish.example.json` from the current
+   `/v1/catalog` response, not guessed addresses or Mycelium names. Install the
+   optional user publisher unit after router access is provisioned.
+4. Expose the existing private router through an authenticated local tunnel,
+   then customize `services-watch.example.json` for that installation and
+   source scope. Run `unibus-services watch watch.json 12000`.
+5. Verify exact source identities and expiry in the output. Stop the publisher
+   and confirm retained evidence becomes stale. This does not tune a radio or
+   allocate a TV tuner.
+
+Existing hub configuration on home-pi is owned by another Unix account and
+not writable/readable by the default Mycelium account. Live bus provisioning
+must wait for authorized router-config access; do not bypass that boundary by
+switching accounts or spawning an extra hub.
+
+## Adapter adoption
+
+ADB projects its existing six-second smart-socket inventory lease. A device
+serial hashes to a stable resource ID, including network-ADB serials. Native
+ADB still owns selecting/authorizing a device and all raw socket semantics.
+Unauthorized/offline devices have no advertised action. Unavailable backends
+report disconnected; an all-unauthorized device list reports authentication
+required. A reachable empty server is healthy, not a claim that a phone exists.
+
+Existing ADB configurations are unchanged unless serve mode sets
+`publish_services: true` (requires inventory polling and schema v2). Add the
+two exact publish grants and snapshot routes before enabling it. New
+`unibus-adb init` output includes those grants, an inventory-only observer,
+and `watch.json`. Observer credentials grant no ADB socket access.
+
+Radioman exposes `/v1/catalog` and `/v1/health` on its existing authenticated
+provider listener, derived from its registered device index and control socket.
+Bearer authentication remains mandatory; DCP-Version remains required for
+DCP routes, not generic inventory routes. A failed control socket reports
+disconnected and withdraws advertised control operations. Registered devices
+are metadata, not claims of measured hardware connectivity or free capacity.
+Its legacy spectrum stream is deliberately not advertised as a v2 stream.
+Radio actions still go through the native revision-bound DCP catalog; no
+generic control executor or new Unibus dependency is added to Radioman.
+
 ## Next integration slices
 
-1. Publish/retain these documents through the existing bus grants and expose a
-   fleet scope in the inspector; do not invent another discovery daemon.
-2. Adapt Radioman and ADB using their existing source-owned probes and commands.
-3. Add optional health/metrics discovery to declarative configuration using
+1. Provision the protected live router grants and deploy adapter changes on
+   reachable hosts; verify end-to-end under their existing private routing.
+2. Add optional health/metrics discovery to declarative configuration using
    these contracts, not a parallel health schema.
-4. Implement demand-driven sharing only where protocol semantics permit it,
+3. Implement demand-driven sharing only where protocol semantics permit it,
    with bounded per-consumer queues and cancellation/drop telemetry. No media
    fanout behavior is changed by this slice.
