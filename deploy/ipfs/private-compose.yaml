@@ -1,0 +1,32 @@
+services:
+  kubo:
+    image: ipfs/kubo:v0.43.1
+    container_name: unibus-kubo-private
+    restart: unless-stopped
+    cpus: 1
+    mem_limit: 512m
+    pids_limit: 128
+    environment:
+      IPFS_PROFILE: server
+      IPFS_SWARM_KEY_FILE: /run/secrets/swarm.key
+      LIBP2P_FORCE_PNET: "1"
+      PRIVATE_OVERLAY_IP: ${PRIVATE_OVERLAY_IP:?set overlay IP}
+      PRIVATE_STORAGE_MAX: ${PRIVATE_STORAGE_MAX:-8GB}
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: 400MiB
+    command: ["daemon", "--enable-gc"]
+    ports:
+      - "127.0.0.1:5002:5001"
+      - "${PRIVATE_OVERLAY_IP:?set overlay IP}:4002:4001/tcp"
+    volumes:
+      - private-data:/data/ipfs
+      - ${PRIVATE_KEY_FILE:?set private key path}:/run/secrets/swarm.key:ro
+      - ./private-init.sh:/container-init.d/010-private.sh:ro
+    healthcheck:
+      test: ["CMD", "ipfs", "id"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+volumes:
+  private-data:
+    name: unibus-kubo-private-data

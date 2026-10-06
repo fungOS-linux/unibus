@@ -95,6 +95,11 @@ The TV has local copies, not a continuous IPFS dependency.
 
 ## Replication and backup boundaries
 
+Agora and Titan now have a separate [private swarm](ipfs-private-swarm.md).
+The adapter example defaults to its loopback RPC port 5002. The public demo
+container on port 5001 remains separate. Both demo PDFs are explicitly pinned
+on the private reserve; this does not enable automatic replication of new CIDs.
+
 Additional Kubo nodes can join the public network or a separate private swarm;
 joining alone does not replicate pins. Start with explicit pin replication to
 a second storage node; use IPFS Cluster only if shared pin-set orchestration is

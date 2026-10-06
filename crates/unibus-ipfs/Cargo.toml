@@ -13,6 +13,7 @@ reqwest.workspace = true
 unibus.workspace = true
 cid = "0.11"
 tempfile.workspace = true
+getrandom.workspace = true
 
 [dev-dependencies]
 unibus-router = { path = "../unibus-router" }

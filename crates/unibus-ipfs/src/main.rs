@@ -19,6 +19,25 @@ struct Config {
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("swarm-key") if args.len() == 2 => {
+            let path = std::path::Path::new(&args[1]);
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new("."));
+            let mut secret = [0u8; 32];
+            getrandom::fill(&mut secret)
+                .map_err(|error| anyhow::anyhow!("swarm key generation failed: {error}"))?;
+            let mut file = tempfile::NamedTempFile::new_in(parent)?;
+            file.write_all(b"/key/swarm/psk/1.0.0/\n/base16/\n")?;
+            for byte in secret {
+                write!(file, "{byte:02x}")?;
+            }
+            file.write_all(b"\n")?;
+            file.as_file().sync_all()?;
+            file.persist_noclobber(path)?;
+            println!("created private swarm key; contents are not logged");
+        }
         Some("serve") if args.len() == 2 => {
             let config: Config = serde_json::from_slice(&fs::read(&args[1])?)?;
             ensure!(
@@ -104,7 +123,7 @@ fn main() -> Result<()> {
             })?;
         }
         _ => anyhow::bail!(
-            "usage: unibus-ipfs serve CONFIG.json | fetch KUBO_ORIGIN CID NEW_OUTPUT_FILE | download CLIENT_CONFIG.json ADAPTER_PRODUCER CID NEW_OUTPUT_FILE"
+            "usage: unibus-ipfs serve CONFIG.json | fetch KUBO_ORIGIN CID NEW_OUTPUT_FILE | download CLIENT_CONFIG.json ADAPTER_PRODUCER CID NEW_OUTPUT_FILE | swarm-key NEW_PRIVATE_FILE"
         ),
     }
     Ok(())

@@ -9,6 +9,6 @@
     "schema_version": 2,
     "read_timeout_ms": 100
   },
-  "kubo_rpc": "http://127.0.0.1:5001",
+  "kubo_rpc": "http://127.0.0.1:5002",
   "allowed_producers": ["canvas.pdf-reader"]
 }

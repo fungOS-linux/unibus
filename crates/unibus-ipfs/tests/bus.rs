@@ -17,6 +17,34 @@ impl Drop for Process {
 }
 
 #[test]
+fn private_key_generation_is_bounded_private_and_non_overwriting() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("swarm.key");
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_unibus-ipfs"))
+            .arg("swarm-key")
+            .arg(&path)
+            .output()
+            .unwrap()
+    };
+    assert!(run().status.success());
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(bytes.starts_with(b"/key/swarm/psk/1.0.0/\n/base16/\n"));
+    let key = std::str::from_utf8(&bytes).unwrap().lines().nth(2).unwrap();
+    assert!(key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert!(!run().status.success());
+    assert!(std::fs::read(&path).unwrap() == bytes);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
 fn cid_download_crosses_real_bus_without_json_blob_encoding() {
     let dir = tempfile::tempdir().unwrap();
     for name in ["adapter", "reader"] {
