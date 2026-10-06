@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub mod service;
+
 pub const STREAM_DESCRIPTOR_KIND: &str = "stream.descriptor.v1";
 pub const ENDPOINT_ANNOUNCEMENT_KIND: &str = "stream.endpoints.v1";
 pub const SCHEMA_VERSION: u32 = 1;
@@ -789,10 +791,9 @@ impl ObservationValueKind {
                 if let Self::Vector {
                     maximum_elements, ..
                 } = self
+                    && (*maximum_elements == 0 || *maximum_elements > 65_536)
                 {
-                    if *maximum_elements == 0 || *maximum_elements > 65_536 {
-                        return Err("vector maximum_elements must be in 1..=65536".into());
-                    }
+                    return Err("vector maximum_elements must be in 1..=65536".into());
                 }
             }
             Self::Histogram { boundaries, .. } => {
