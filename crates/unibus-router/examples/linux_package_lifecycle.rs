@@ -137,17 +137,15 @@ fn installed_version() -> Result<String> {
     output("dpkg-query", &["-W", "-f=${Version}", "unibus-core"])
 }
 
-fn run(old: &str, upgrade: &str) -> Result<()> {
+fn run(old: &str, upgrade: &str, preinstalled: bool) -> Result<()> {
     disposable_guard(
-        &fs::read_to_string("/sys/class/dmi/id/product_name")?,
-        &fs::read_to_string("/run/unibus-package-validation")?,
+        &fs::read_to_string("/sys/class/dmi/id/product_name")
+            .context("read disposable DMI product")?,
+        &fs::read_to_string("/run/unibus-package-validation")
+            .context("read disposable runtime marker")?,
         &output("systemd-detect-virt", &["--vm"])?,
         &output("id", &["-u"])?,
     )?;
-    ensure!(
-        !std::path::Path::new(CONFIG).exists(),
-        "guest already has Unibus config"
-    );
     let old_version = output("dpkg-deb", &["-f", old, "Version"])?;
     let new_version = output("dpkg-deb", &["-f", upgrade, "Version"])?;
     ensure!(
@@ -188,6 +186,35 @@ fn run(old: &str, upgrade: &str) -> Result<()> {
             != fs::read(new_root.join("etc/unibus/hub.json"))?,
         "upgrade must change the packaged conffile to exercise preservation"
     );
+    if preinstalled {
+        ensure!(
+            installed_version()? == old_version,
+            "image has wrong core version"
+        );
+        ensure!(
+            fs::read(CONFIG)? == fs::read(old_root.join("etc/unibus/hub.json"))?,
+            "image must contain the unchanged test default config"
+        );
+        ensure!(
+            output("systemctl", &["is-enabled", UNIT])? == "enabled",
+            "image router not enabled"
+        );
+        assert_local_unprivileged()?;
+        output("/usr/bin/unibusctl", &["doctor", "--json"])?;
+        println!(
+            "PASS image boot: enabled router started without intervention, unprivileged and loopback-only"
+        );
+        output("systemctl", &["disable", "--now", UNIT])?;
+        // The image-boot probe is a separate phase; do not carry its start
+        // counter into the deliberately rapid crash/upgrade lifecycle tests.
+        output("systemctl", &["reset-failed", UNIT])?;
+        output("dpkg", &["--purge", "unibus-core"])?;
+        output("systemctl", &["daemon-reload"])?;
+    }
+    ensure!(
+        !std::path::Path::new(CONFIG).exists(),
+        "guest already has Unibus config"
+    );
     output("dpkg", &["-i", old])?;
     output("systemctl", &["daemon-reload"])?;
     ensure!(
@@ -202,12 +229,14 @@ fn run(old: &str, upgrade: &str) -> Result<()> {
         "installation unexpectedly enabled the router"
     );
     println!("PASS install: disabled, not running");
+    output("/usr/bin/unibusctl", &["doctor", "--json"])?;
     output(
         "systemd-analyze",
         &["verify", "/usr/lib/systemd/system/unibus-router.service"],
     )?;
     output("systemctl", &["enable", "--now", UNIT])?;
     assert_local_unprivileged()?;
+    output("/usr/bin/unibusctl", &["doctor", "--json"])?;
     println!("PASS start: unprivileged, loopback-only, ungranted registration rejected");
     let before = pid()?;
     output("systemctl", &["restart", UNIT])?;
@@ -255,6 +284,10 @@ fn run(old: &str, upgrade: &str) -> Result<()> {
         "remove left binary"
     );
     ensure!(
+        !std::path::Path::new("/usr/bin/unibusctl").exists(),
+        "remove left CLI"
+    );
+    ensure!(
         !std::path::Path::new("/usr/lib/systemd/system/unibus-router.service").exists(),
         "remove left unit"
     );
@@ -267,10 +300,10 @@ fn run(old: &str, upgrade: &str) -> Result<()> {
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
     ensure!(
-        args.len() == 3,
-        "usage: linux_package_lifecycle OLD.deb UPGRADE.deb"
+        args.len() == 3 || (args.len() == 4 && args[3] == "--preinstalled"),
+        "usage: linux_package_lifecycle OLD.deb UPGRADE.deb [--preinstalled]"
     );
-    run(&args[1], &args[2])
+    run(&args[1], &args[2], args.len() == 4)
 }
 
 #[cfg(test)]

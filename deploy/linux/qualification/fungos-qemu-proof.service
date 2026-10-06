@@ -1,0 +1,15 @@
+[Unit]
+Description=Disposable Unibus core package qualification (not a production service)
+After=systemd-tmpfiles-setup.service unibus-router.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/bin/systemd-tmpfiles --create /opt/unibus-qualification/tmpfiles.conf
+ExecStart=/opt/unibus-qualification/linux_package_lifecycle /opt/unibus-qualification/core.deb /opt/unibus-qualification/upgrade.deb --preinstalled
+ExecStartPost=/usr/bin/systemctl --no-block poweroff
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

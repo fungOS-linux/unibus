@@ -148,12 +148,24 @@ fn write(stage: &Path, path: &str, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn build(binary: &Path, directory: &Path) -> Result<PathBuf> {
+fn build(binary: &Path, doctor: &Path, directory: &Path) -> Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let arch = architecture(&fs::read(binary)?)?;
-    let versions = output("readelf", &["--version-info".as_ref(), binary.as_os_str()])?;
+    ensure!(
+        architecture(&fs::read(doctor)?)? == arch,
+        "router and CLI architectures disagree"
+    );
+    let versions = format!(
+        "{}\n{}",
+        output("readelf", &["--version-info".as_ref(), binary.as_os_str()])?,
+        output("readelf", &["--version-info".as_ref(), doctor.as_os_str()])?
+    );
     let dynamic = output("readelf", &["--dynamic".as_ref(), binary.as_os_str()])?;
     validate_libraries(&dynamic)?;
+    validate_libraries(&output(
+        "readelf",
+        &["--dynamic".as_ref(), doctor.as_os_str()],
+    )?)?;
     let glibc = glibc_floor(&versions)?;
     fs::create_dir_all(directory)?;
     let destination = directory.join(format!(
@@ -182,6 +194,9 @@ fn build(binary: &Path, directory: &Path) -> Result<PathBuf> {
     let staged_binary = stage.join("usr/bin/unibus-router");
     fs::copy(binary, &staged_binary)?;
     fs::set_permissions(staged_binary, fs::Permissions::from_mode(0o755))?;
+    let staged_doctor = stage.join("usr/bin/unibusctl");
+    fs::copy(doctor, &staged_doctor)?;
+    fs::set_permissions(staged_doctor, fs::Permissions::from_mode(0o755))?;
     let archive = workspace.path().join("package.deb");
     let result = Command::new("dpkg-deb")
         .args(["--root-owner-group", "--build"])
@@ -210,10 +225,14 @@ fn build(binary: &Path, directory: &Path) -> Result<PathBuf> {
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().collect();
     ensure!(
-        args.len() == 3,
-        "usage: linux_core_deb ROUTER_EXECUTABLE OUTPUT_DIRECTORY"
+        args.len() == 4,
+        "usage: linux_core_deb ROUTER_EXECUTABLE UNIBUSCTL_EXECUTABLE OUTPUT_DIRECTORY"
     );
-    build(Path::new(&args[1]), Path::new(&args[2]))?;
+    build(
+        Path::new(&args[1]),
+        Path::new(&args[2]),
+        Path::new(&args[3]),
+    )?;
     Ok(())
 }
 
@@ -286,9 +305,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         // Packaging mechanics only: use this test's ELF, not a live service.
         let binary = std::env::current_exe().unwrap();
-        let archive = build(&binary, directory.path()).unwrap();
+        let archive = build(&binary, &binary, directory.path()).unwrap();
         let before = fs::read(&archive).unwrap();
-        assert!(build(&binary, directory.path()).is_err());
+        assert!(build(&binary, &binary, directory.path()).is_err());
         assert_eq!(fs::read(&archive).unwrap(), before);
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
         let extracted = tempfile::tempdir().unwrap();
@@ -301,6 +320,10 @@ mod tests {
             ],
         )
         .unwrap();
+        assert_eq!(
+            fs::read(extracted.path().join("usr/bin/unibusctl")).unwrap(),
+            fs::read(&binary).unwrap()
+        );
         for path in [
             "etc",
             "etc/unibus",

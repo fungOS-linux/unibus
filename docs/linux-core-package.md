@@ -1,9 +1,9 @@
 # Linux core package (initial slice)
 
-The reference `unibus-core` Debian payload installs only the router. It does
+The reference `unibus-core` Debian payload installs the router and `unibusctl`. It does
 not install or enable adapters, Mycelium, Canvas, an updater, or a LAN listener.
-The public Rust contracts remain library crates; there is not yet a unified
-operator CLI package. This is not a production-readiness certification.
+The public Rust contracts remain library crates. The CLI currently provides
+local diagnostics only. This is not a production-readiness certification.
 
 The service uses systemd's dynamic unprivileged `unibus` identity. systemd owns
 0700 runtime/state directories under `/run/unibus` and `/var/lib/unibus`.
@@ -15,6 +15,15 @@ at credential paths; do not make secrets world-readable to accommodate the
 dynamic user. Discovery never grants authorization.
 
 ## Build and inspect (Linux, isolated working directory)
+
+Qualification input pins live in `deploy/linux/core/build-inputs.toml`:
+Rust **1.98.1** and Isochrone **bfd1ec2ae7ba46e6cadb8b94ed8e44e913a9951c**.
+Use `cargo +1.98.1` for every command below. Export that exact Isochrone
+revision into the sibling `isochrone/` directory with `git archive`, not a
+copy of an actively edited checkout. The committed lockfile resolves against
+this pinned sibling without regeneration. These are qualification pins, not
+a fleet software manifest or a new updater; the file does not automatically
+override a developer's workspace toolchain.
 
 Run from a clean tracked-source checkout with the workspace's existing sibling
 Isochrone checkout available. The binary and packager must be built from the
@@ -28,15 +37,15 @@ cargo check --locked -p unibus-router --all-targets
 cargo test --locked -p unibus-router
 cargo test --locked -p unibus-router --example linux_core_deb
 cargo test --locked -p unibus-router --example linux_core_deb -- --ignored
-cargo build --locked --release -p unibus-router --bin unibus-router --example linux_core_deb
+cargo build --locked --release -p unibus-router --bins --example linux_core_deb
 package_out=$(mktemp -d /var/tmp/unibus-core-package.XXXXXX)
-target/release/examples/linux_core_deb target/release/unibus-router "$package_out"
+target/release/examples/linux_core_deb target/release/unibus-router target/release/unibusctl "$package_out"
 dpkg-deb --info "$package_out/unibus-core_0.1.0_amd64.deb"
 dpkg-deb --contents "$package_out/unibus-core_0.1.0_amd64.deb"
 ```
 
 The Rust packager uses the shared payload assets, derives architecture from the
-ELF header (`amd64` or `arm64`), and calculates the libc floor from required GLIBC
+ELF headers (`amd64` or `arm64`, both must agree), and calculates the libc floor from both binaries' required GLIBC
 symbol versions using `readelf`. It rejects unknown runtime libraries and refuses
 to overwrite an existing package. It publishes only a completed archive, with
 fixed payload permissions independent of the builder's umask. Version comes
@@ -58,8 +67,8 @@ export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='qemu-aarch64 -L /usr/aarch64-linux-gnu'
 cargo check --locked -p unibus-router --target aarch64-unknown-linux-gnu
 cargo test --locked -p unibus-router --target aarch64-unknown-linux-gnu
-cargo build --locked --release -p unibus-router --target aarch64-unknown-linux-gnu --bin unibus-router --example linux_package_lifecycle
-target/release/examples/linux_core_deb target/aarch64-unknown-linux-gnu/release/unibus-router "$package_out"
+cargo build --locked --release -p unibus-router --target aarch64-unknown-linux-gnu --bins --example linux_package_lifecycle
+target/release/examples/linux_core_deb target/aarch64-unknown-linux-gnu/release/unibus-router target/aarch64-unknown-linux-gnu/release/unibusctl "$package_out"
 ```
 
 User-mode emulation checks Rust behavior, not systemd. Repeat the lifecycle
@@ -80,6 +89,79 @@ journalctl -u unibus-router.service -b
 Do not enable this alongside an existing hub on port 18790. Migrate ownership,
 grants, credentials and the listener deliberately. Legacy `unibus-hub.service`
 is untouched. Restart after config changes; no live reload is claimed.
+
+## Local diagnostics
+
+`unibusctl doctor [--config /path/hub.json] [--json]` is read-only and exits
+nonzero for a failed check. It reuses `HubConfig` validation, redacts invalid
+configuration values, and reports systemd load/active/enabled states. The
+packaged disabled/inactive default is healthy; enabled-but-stopped is not.
+For an active service it checks that the configured TCP endpoint appears in
+`ss -ltnH`. That is socket presence, not process ownership, authentication,
+QUIC health, or an end-to-end delivery test. `systemctl` and `ss` must be
+available; missing tools/permissions fail visibly. It does not start services,
+read peer catalogs, discover nodes, grant access, or change configuration.
+
+## Disposable fungOS overlay
+
+`deploy/linux/qualification/` is **test-only**, never a production profile.
+It installs/enables the core into the disposable image and embeds the two
+Debian fixtures and lifecycle checker under `/opt/unibus-qualification/`.
+It boots fungOS systemd, creates the runtime guard marker with
+systemd-tmpfiles, and runs the same guarded lifecycle checker with
+`--preinstalled`. This first verifies the default-config router started at
+boot without intervention, then resets only that guarded guest's package
+before exercising the normal lifecycle checks.
+The checker additionally runs the packaged doctor when disabled and active,
+and verifies that package removal deletes the CLI. Success powers off the VM;
+failure remains visible on its console. This tests image-enabled startup and
+package installation after fungOS boot, not an enrolled edge's signed update
+flow or disk reboot persistence.
+
+Manual assembly uses the existing Mycelium-owned
+`fungOS/qemu/scripts/build-initramfs.sh` and `rootfs-overlay/init` from the
+revision recorded in `build-inputs.toml`. Start from a clean rootfs tar, never
+a running peer disk. Prepare an overlay containing:
+
+- `/init`: the existing fungOS early-init script.
+- `/usr/lib/systemd/system/fungos-qemu-proof.service`: the qualification unit.
+- `/opt/unibus-qualification/tmpfiles.conf`: the qualification guard marker.
+- `/opt/unibus-qualification/linux_package_lifecycle`: the built Rust checker.
+- `/opt/unibus-qualification/core.deb` and `upgrade.deb`: the documented fixtures.
+
+Before building the initrd, extract the clean rootfs into a fresh image staging
+directory, copy in the overlay, run `chroot IMAGE_ROOT dpkg -i
+/opt/unibus-qualification/core.deb`, then `systemctl --root=IMAGE_ROOT enable
+unibus-router.service`. Archive that staged filesystem as the builder's input.
+Do not run those commands against `/` or an existing managed-node filesystem.
+Run the builder as root with an explicit fresh `WORK_DIR`, staged rootfs tar,
+overlay directory, and output initrd. Boot QEMU/KVM with the matching Genesis
+kernel, `-smbios type=1,product=unibus-package-validation`, `-nic none`, and
+`-append 'rdinit=/init console=ttyS0,115200n8 panic=-1'`; retain serial output.
+No LAN bridge, host credential, or existing machine identity is needed.
+Production application delivery remains Mycelium's authorized signed-package
+flow; this overlay does not relax that policy.
+
+### fungOS qualification, 2026-10-06
+
+On Agora, Rust 1.98.1 and the exact pinned Isochrone archive passed locked
+metadata/check and 48 normal router/CLI/example tests, plus the explicitly
+enabled Debian archive test. The new amd64 core archive (router + CLI) is
+`e51125ac5f8644e57a2794fd839d5dd578c7a0d41962336e8b8e74ca7748b69a`.
+Its derived runtime floor is **libc6 >= 2.39**; the retained Bookworm image
+cannot satisfy that. The fungOS Trixie cloud rootfs used instead is
+`8aca8323ef59722438abafe3e0ee9f57abaa22dee435e044e0476ac86ccdbba4`
+(snapshot `20261004T000000Z`, clean rootfs, not a managed VM disk).
+
+A no-NIC KVM guest passed all eight stages, including image-enabled boot,
+then powered off. Evidence remains on Agora under
+`/var/tmp/unibus-doctor.917NzE/console4.log`. The image-boot phase resets its
+systemd start counter before the rapid lifecycle phase; otherwise the extra
+boot start legitimately reaches the production unit's default rate limit.
+The service's crash/start limits are not relaxed. Upgrade remains a version
+and conffile-change fixture, not a compatibility claim between implementations.
+This router+CLI package has not yet repeated ARM64 image qualification;
+the older ARM64 evidence below applies to the router-only payload.
 
 ## Disposable-VM lifecycle check
 

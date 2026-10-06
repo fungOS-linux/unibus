@@ -1,0 +1,6 @@
+# Qualification inputs, not a fleet discovery or update manifest.
+rust_toolchain = "1.98.1"
+isochrone_repository = "https://github.com/ajmwagar/isochrone.git"
+isochrone_revision = "bfd1ec2ae7ba46e6cadb8b94ed8e44e913a9951c"
+fungos_harness_repository = "https://github.com/ajmwagar/mycelium.git"
+fungos_harness_revision = "a3c455ce0a3480a2eb46a73a7a5a147c78003c7f"
