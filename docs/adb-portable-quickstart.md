@@ -3,7 +3,9 @@
 Supported validation targets: macOS and Linux. Both sides use the same
 `unibus-adb` binary; it includes its isolated hub. Mycelium is **optional**.
 There is no requirement for sibling repositories, Canvas, or our Mac paths.
-Use current stable Rust and Git. Install Android platform-tools separately
+Use current stable Rust, Git, and a native C build toolchain (Xcode Command
+Line Tools on macOS; `build-essential` on Debian/Ubuntu) for TLS dependencies.
+Install Android platform-tools separately
 for the ordinary `adb` client/server. Linux USB access needs the distro's
 Android udev rules and appropriate user permissions; do not run the bridge or
 ADB as root to bypass them.
