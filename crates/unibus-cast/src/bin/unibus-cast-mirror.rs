@@ -315,14 +315,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .spawn()?,
     );
     let mut output = gst.0.stdout.take().ok_or("backend stdout missing")?;
-    let mut receiver = Backend(
-        Command::new("uxplay")
-            .args(config.uxplay_args()?)
-            .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()?,
-    );
+    let mut receiver = if config.receiver_enabled {
+        Some(Backend(
+            Command::new("uxplay")
+                .args(config.uxplay_args()?)
+                .stdin(Stdio::null())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn()?,
+        ))
+    } else {
+        None
+    };
     let clients: Subscribers = Arc::new(Mutex::new(Fanout::default()));
     let workers = Arc::new(AtomicUsize::new(0));
     let fanout = clients.clone();
@@ -346,8 +350,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(status) = gst.0.try_wait()? {
             return Err(format!("GStreamer exited: {status}").into());
         }
-        if let Some(status) = receiver.0.try_wait()? {
-            return Err(format!("UxPlay exited: {status}").into());
+        if let Some(receiver) = &mut receiver {
+            if let Some(status) = receiver.0.try_wait()? {
+                return Err(format!("UxPlay exited: {status}").into());
+            }
         }
         if let Ok(error) = failed_rx.try_recv() {
             return Err(format!("media pipe failed: {error}").into());

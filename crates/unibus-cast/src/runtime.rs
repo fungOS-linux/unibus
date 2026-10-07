@@ -12,10 +12,25 @@ pub struct MirrorConfig {
     pub receiver_port: u16,
     pub video_rtp_port: u16,
     pub audio_rtp_port: u16,
+    #[serde(default = "receiver_enabled_default")]
+    pub receiver_enabled: bool,
+    #[serde(default = "video_bind_default")]
+    pub video_bind: Ipv4Addr,
+    #[serde(default)]
+    pub normalize_video: bool,
+}
+fn receiver_enabled_default() -> bool {
+    true
+}
+fn video_bind_default() -> Ipv4Addr {
+    Ipv4Addr::LOCALHOST
 }
 
 impl MirrorConfig {
     pub fn validate(&self) -> Result<(), String> {
+        if !self.video_bind.is_private() && !self.video_bind.is_loopback() {
+            return Err("RTP bind must be a specific private or loopback IPv4 address".into());
+        }
         if !self.listen.ip().is_private() || self.listen.port() < 1024 {
             return Err("HTTP listener must be a specific private LAN IPv4 endpoint".into());
         }
@@ -32,7 +47,11 @@ impl MirrorConfig {
             return Err("receiver name invalid".into());
         }
         let octets: Vec<_> = self.receiver_device_id.split(':').collect();
-        if octets.len() != 6 || octets.iter().any(|v| v.len() != 2 || u8::from_str_radix(v, 16).is_err()) {
+        if octets.len() != 6
+            || octets
+                .iter()
+                .any(|v| v.len() != 2 || u8::from_str_radix(v, 16).is_err())
+        {
             return Err("receiver device ID must be a stable MAC-format identity".into());
         }
         if !(1024..=65533).contains(&self.receiver_port)
@@ -94,7 +113,7 @@ impl MirrorConfig {
         self.validate()?;
         // H264-only first slice. No raw video round-trip, software video encoder,
         // or unrestricted host-provided GStreamer graph.
-        let args = vec!["-q".into(), "mpegtsmux".into(), "name=mux".into(),
+        let mut args: Vec<String> = vec!["-q".into(), "mpegtsmux".into(), "name=mux".into(),
             // Stock Android MediaPlayer uses byte-based HTTP buffering; null
             // packets bound startup even for an almost-static desktop.
             "bitrate=8000000".into(), "alignment=7".into(), "!".into(), "fdsink".into(), "fd=1".into(), "sync=false".into(),
@@ -118,6 +137,39 @@ impl MirrorConfig {
             "!".into(), "audioconvert".into(), "!".into(), "voaacenc".into(), "bitrate=128000".into(),
             "!".into(), "aacparse".into(), "!".into(), "queue".into(),
             "max-size-time=1000000000".into(), "!".into(), "mux.".into()];
+        for arg in &mut args {
+            if arg == "address=127.0.0.1" {
+                *arg = format!("address={}", self.video_bind);
+            }
+        }
+        if self.normalize_video {
+            let index = args
+                .iter()
+                .position(|arg| arg == "h264parse")
+                .ok_or("video parser missing")?;
+            // GPU decode/reencode normalizes non-IDR Mac I-slices into a real
+            // IDR cadence with repeated codec headers. No software fallback.
+            args.splice(
+                index..index,
+                [
+                    "h264parse",
+                    "!",
+                    "nvh264dec",
+                    "!",
+                    "video/x-raw(memory:CUDAMemory),format=NV12",
+                    "!",
+                    "nvh264enc",
+                    "gop-size=30",
+                    "bitrate=6000",
+                    "bframes=0",
+                    "rc-lookahead=0",
+                    "zerolatency=true",
+                    "repeat-sequence-header=true",
+                    "!",
+                ]
+                .map(String::from),
+            );
+        }
         Ok(args)
     }
 }
@@ -144,7 +196,24 @@ mod tests {
             receiver_port: 35100,
             video_rtp_port: 35200,
             audio_rtp_port: 35201,
+            receiver_enabled: true,
+            video_bind: Ipv4Addr::LOCALHOST,
+            normalize_video: false,
         }
+    }
+    #[test]
+    fn gpu_mux_only_plan_has_explicit_private_bind_and_no_software_fallback() {
+        let mut c = config();
+        c.receiver_enabled = false;
+        c.normalize_video = true;
+        c.video_bind = "192.168.2.67".parse().unwrap();
+        let graph = c.gstreamer_args().unwrap().join(" ");
+        assert!(graph.contains("nvh264dec") && graph.contains("nvh264enc"));
+        assert!(graph.contains("repeat-sequence-header=true") && graph.contains("gop-size=30"));
+        assert!(graph.contains("address=192.168.2.67"));
+        assert!(!graph.contains("avdec") && !graph.contains("x264enc"));
+        c.video_bind = Ipv4Addr::UNSPECIFIED;
+        assert!(c.validate().is_err());
     }
     #[test]
     fn fixed_plans_and_private_admission() {

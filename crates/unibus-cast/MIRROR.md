@@ -1,5 +1,24 @@
 # Single AirPlay mirror to Canvas
 
+## GPU normalization / split receiver
+
+Optional configuration keys default to `receiver_enabled=true`,
+`video_bind="127.0.0.1"`, `normalize_video=false` for the existing Pi receiver.
+Set `receiver_enabled=false`, `video_bind="192.168.2.67"`,
+`normalize_video=true` to run a mux-only Agora worker receiving trusted RTP.
+Use video/audio ports 35300/35301 and allow the FireTV IP in `allowed_clients`.
+Point a separately supervised, paired UxPlay receiver's RTP outputs at this
+worker. Restrict worker UDP ingress to that authorized receiver using the host
+firewall; private binding is not authentication. Never expose these ports WAN-wide.
+
+Normalization uses `h264parse ! nvh264dec !
+video/x-raw(memory:CUDAMemory),format=NV12 ! nvh264enc` with GOP 30,
+6 Mbps, zero B-frames/lookahead, zero-latency and repeated sequence headers.
+GPU failure is explicit; no unqualified CPU fallback. This addresses Mac
+non-IDR I-frame streams whose ordinary passthrough does not repeat codec
+headers. It adds a GPU decode/encode stage; measure latency and hardware FPS.
+This role does not advertise another AirPlay receiver or touch existing audio.
+
 `unibus-cast-mirror CONFIG.json` supervises a separate UxPlay process and a fixed
 GStreamer graph. This experimental runtime does not replace Shairport Sync,
 implement Google Cast, publish session contracts, or drive Canvas workspaces.
