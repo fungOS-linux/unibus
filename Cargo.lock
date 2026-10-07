@@ -2709,6 +2709,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "unibus-cast"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "stream-descriptors",
+]
+
+[[package]]
 name = "unibus-dcp"
 version = "0.1.0"
 dependencies = [
