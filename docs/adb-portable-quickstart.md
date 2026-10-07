@@ -22,8 +22,11 @@ unibus-adb --help
 ```
 
 The repository requires its normal GitHub access rights. Other cross-project
-Rust dependencies use public HTTPS Git URLs pinned to revisions; Cargo fetches
-them automatically. For this ADB build, no ALSA, MIDI or Lua development
+Rust dependencies in the default workspace use public HTTPS Git URLs pinned
+to revisions; Cargo fetches them automatically. The opt-in Holodeck adapter
+has its own workspace/lockfile and requires separate access to the private
+Holodeck repository; it is not resolved by this build.
+For this ADB build, no ALSA, MIDI or Lua development
 packages are needed. Full Linux workspace builds additionally need
 `pkg-config` and `libasound2-dev`.
 

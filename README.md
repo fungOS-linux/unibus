@@ -22,6 +22,8 @@ Canvas-side edge connector are tracked downstream (`dock-2ex7` epic).
 Use current stable Rust and Git. No sibling checkout is required: external
 Rust integrations use revision-pinned HTTPS Git dependencies. On Linux, full
 workspace builds require `pkg-config` and `libasound2-dev` for MIDI/audio.
+The private Holodeck integration is an opt-in independent workspace; see
+[its runbook](docs/holodeck-bridge.md) for manifest-path builds and repository access.
 
 For only the portable ADB bridge (no audio development libraries required):
 

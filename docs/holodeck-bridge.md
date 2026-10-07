@@ -71,8 +71,11 @@ on Agora under the owner's private configuration directory.
 
 ### Manual runbook
 
-1. Build and test with `cargo check -p unibus-holodeck`, then
-   `cargo test -p unibus-holodeck`. Build release artifacts only for deployment.
+1. This private integration is an opt-in independent workspace, so core/ADB
+   builds do not require Holodeck repository access. With that access configured,
+   run `cargo check --locked --manifest-path crates/unibus-holodeck/Cargo.toml`,
+   then `cargo test --locked --manifest-path crates/unibus-holodeck/Cargo.toml`.
+   Build release artifacts with that same manifest path only for deployment.
    Linux artifacts were built on Agora. For builders without private Git access,
    transfer a verified bundle of the pinned Holodeck revision and use a scoped Git
    URL rewrite for that build; never transfer Git credentials or change global
