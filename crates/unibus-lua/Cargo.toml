@@ -18,3 +18,5 @@ serde_json.workspace = true
 [dev-dependencies]
 unibus.workspace = true
 tempfile.workspace = true
+tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
