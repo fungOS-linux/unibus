@@ -1,0 +1,23 @@
+name: Clean standalone build
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  portable:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux native prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev
+      - name: Check all default workspace targets without sibling checkouts
+        run: cargo check --locked --workspace --all-targets
+      - name: Test ADB, framing and portable credential setup
+        run: cargo test --locked -p unibus -p unibus-adb -p unibus-services
+      - name: Build standalone ADB binary
+        run: cargo build --locked -p unibus-adb

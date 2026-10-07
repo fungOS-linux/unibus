@@ -67,19 +67,19 @@ pub fn tunnel(target: &str) -> Result<()> {
         .iter()
         .map(|v| v.as_str().context("invalid SSH plan argument"))
         .collect::<Result<Vec<_>>>()?;
-    let mut ssh = Command::new("/usr/bin/ssh");
-    ssh.args([
-        "-N",
-        "-o",
-        "ExitOnForwardFailure=yes",
-        "-o",
-        "ServerAliveInterval=15",
-        "-o",
-        "ServerAliveCountMax=3",
-        "-L",
-        "127.0.0.1:19893:127.0.0.1:18793",
-    ])
-    .args(args);
+    run_ssh(&args)
+}
+
+pub fn static_tunnel(target: &str) -> Result<()> {
+    ensure!(
+        !target.is_empty() && !target.starts_with('-') && !target.chars().any(char::is_whitespace),
+        "SSH target must be HOST or USER@HOST, not options"
+    );
+    run_ssh(&[target])
+}
+
+fn run_ssh(args: &[&str]) -> Result<()> {
+    let mut ssh = ssh_command(args);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -92,9 +92,40 @@ pub fn tunnel(target: &str) -> Result<()> {
     }
 }
 
+fn ssh_command(args: &[&str]) -> Command {
+    let mut ssh = Command::new("ssh");
+    ssh.args([
+        "-N",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-L",
+        "127.0.0.1:19893:127.0.0.1:18793",
+    ])
+    .args(args);
+    ssh
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn static_ssh_is_portable_and_rejects_option_injection() {
+        for target in ["", "-oProxyCommand=evil", "user@host extra", "host\n"] {
+            assert!(static_tunnel(target).is_err());
+        }
+        let command = ssh_command(&["james@usb-host"]);
+        assert_eq!(command.get_program(), "ssh");
+        let args: Vec<_> = command.get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("127.0.0.1:19893:127.0.0.1:18793")));
+        assert_eq!(
+            args.last().unwrap(),
+            &std::ffi::OsStr::new("james@usb-host")
+        );
+    }
     #[test]
     fn discovery_requires_contract_and_freshness_not_a_fuzzy_name() {
         let ad = serde_json::json!({"service_type":"_ssh._tcp","last_seen":100,"ttl":20,

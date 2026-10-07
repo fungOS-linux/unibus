@@ -49,6 +49,20 @@ fn default_read_timeout_ms() -> u64 {
 }
 
 impl ClientConfig {
+    /// Resolve portable token paths against their configuration file, not CWD.
+    /// Absolute paths remain compatible with already installed deployments.
+    pub fn resolve_token_file(&mut self, config_file: &std::path::Path) {
+        if let Some(path) = &self.token_file
+            && path.is_relative()
+        {
+            self.token_file = Some(
+                config_file
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .join(path),
+            );
+        }
+    }
     pub fn token(&self) -> Result<String> {
         let token = match (&self.token_file, &self.token_env) {
             (Some(path), None) => std::fs::read_to_string(path)
@@ -76,6 +90,20 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::net::TcpListener;
+
+    #[test]
+    fn relative_token_follows_relocated_config_not_working_directory() {
+        let directory = std::env::temp_dir().join("unibus-relative-token-test");
+        let token = directory.join("client.token");
+        let mut config: ClientConfig = serde_json::from_value(serde_json::json!({
+            "installation_id":"test", "producer_id":"client", "hub_endpoint":"127.0.0.1:1",
+            "zones":[], "token_file":"client.token"
+        }))
+        .unwrap();
+        config.resolve_token_file(&directory.join("attach.json"));
+        config.resolve_token_file(std::path::Path::new("elsewhere/config.json"));
+        assert_eq!(config.token_file.as_ref().unwrap(), &token);
+    }
 
     #[test]
     fn token_source_is_explicit_and_environment_names_are_bounded() {

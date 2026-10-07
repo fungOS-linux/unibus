@@ -245,8 +245,21 @@ fn start_session(bus: Arc<Client>, peer: String, id: String, socket: TcpStream) 
 }
 fn main() -> Result<()> {
     match std::env::args().nth(1).as_deref() {
+        Some("--help" | "-h" | "help") => {
+            println!(
+                "unibus-adb init NEW_DIRECTORY [--server-id ID] [--client-id ID] [--installation-id ID] [--adb-binary ABSOLUTE_PATH]\nunibus-adb hub ROUTER.json\nunibus-adb CONFIG.json\nunibus-adb inventory [127.0.0.1:5037]\nunibus-adb discover\nunibus-adb tunnel MYCELIUM_TARGET\nunibus-adb tunnel --ssh USER@HOST\n\nTokens are relative to the config file. Init does not overwrite existing directories.\nStart adb manually unless --adb-binary is supplied. Mycelium is optional."
+            );
+            return Ok(());
+        }
         Some("discover") => return discovery::discover(),
         Some("tunnel") => {
+            if std::env::args().nth(2).as_deref() == Some("--ssh") {
+                return discovery::static_tunnel(
+                    &std::env::args()
+                        .nth(3)
+                        .context("tunnel --ssh requires USER@HOST")?,
+                );
+            }
             return discovery::tunnel(
                 &std::env::args()
                     .nth(2)
@@ -254,11 +267,14 @@ fn main() -> Result<()> {
             );
         }
         Some("init") => {
-            return setup::init(std::path::Path::new(
-                &std::env::args()
-                    .nth(2)
-                    .context("init requires a new directory")?,
-            ));
+            return setup::init_with_options(
+                std::path::Path::new(
+                    &std::env::args()
+                        .nth(2)
+                        .context("init requires a new directory")?,
+                ),
+                &setup::Options::parse(std::env::args_os().skip(3))?,
+            );
         }
         Some("hub") => {
             let path = std::env::args()
@@ -282,10 +298,14 @@ fn main() -> Result<()> {
         }
         _ => {}
     }
-    let path = std::env::args_os()
-        .nth(1)
-        .context("usage: unibus-adb <config.json>")?;
-    let mut config: Config = serde_json::from_slice(&std::fs::read(path)?)?;
+    let path = std::path::PathBuf::from(
+        std::env::args_os()
+            .nth(1)
+            .context("usage: unibus-adb <config.json>")?,
+    );
+    let mut config: Config = serde_json::from_slice(&std::fs::read(&path)?)?;
+    // Copying attach.json and its one token is enough on another machine.
+    config.bus.resolve_token_file(&path);
     ensure!(
         config.bus.schema_version == unibus::SCHEMA_VERSION_V2,
         "ADB requires schema version 2"
@@ -369,6 +389,7 @@ fn main() -> Result<()> {
     }
     config.bus.read_timeout_ms = 10;
     let bus = Arc::new(Client::connect(config.bus)?);
+    eprintln!("ADB bridge registered: {}", bus.config().producer_id);
     let inventory_pending = Arc::new(std::sync::Mutex::new(
         std::collections::BTreeSet::<String>::new(),
     ));

@@ -19,6 +19,21 @@ Canvas-side edge connector are tracked downstream (`dock-2ex7` epic).
 
 ## Build
 
+Use current stable Rust and Git. No sibling checkout is required: external
+Rust integrations use revision-pinned HTTPS Git dependencies. On Linux, full
+workspace builds require `pkg-config` and `libasound2-dev` for MIDI/audio.
+
+For only the portable ADB bridge (no audio development libraries required):
+
+```sh
+cargo check --locked -p unibus-adb
+cargo test --locked -p unibus-adb
+cargo install --locked --path crates/unibus-adb
+```
+
+See the [portable ADB quickstart](docs/adb-portable-quickstart.md) for two-machine
+setup, credential handoff, USB permissions, and static SSH without Mycelium.
+
 ```sh
 cargo test          # unit + wire-compat golden vectors
 cargo clippy --all-targets -- -D warnings

@@ -1,5 +1,8 @@
 # USB ADB over Unibus
 
+For a fresh machine, use the [portable quickstart](adb-portable-quickstart.md).
+The Studio/Neo paths below describe an existing deployment, not prerequisites.
+
 Plug an Android device into Studio, enable USB debugging, and approve **Studio's**
 ADB key on the device. On Neo:
 
@@ -137,8 +140,6 @@ processes transferring 4 MiB while rejecting an unapproved client. Full dependen
 clippy currently finds an existing `collapsible_match` in the shared router;
 adapter-only strict clippy is clean.
 
-The Oct 5 verification used the existing working tree. Independently of this
-adapter, the tracked workspace already references an untracked `unibus-fix`
-crate, and `unibus` exports an untracked `service_adoption.rs` module. Those
-pre-existing unfinished sources were preserved, not swept into the ADB commits;
-a clean clone cannot build until their owning work is completed.
+Standalone builds use pinned HTTPS Git dependencies, including the optional
+Isochrone adapter; no sibling Isochrone checkout is required. The clean-build
+workflow checks the default workspace and tests the ADB bridge on macOS/Linux.

@@ -3,11 +3,19 @@ use anyhow::{Result, bail};
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|command| command == "publish") && args.len() == 2 {
-        let config = serde_json::from_slice(&std::fs::read(&args[1])?)?;
+        let mut config: unibus_services::bus::PublicationConfig =
+            serde_json::from_slice(&std::fs::read(&args[1])?)?;
+        config
+            .bus
+            .resolve_token_file(std::path::Path::new(&args[1]));
         return unibus_services::bus::publish(config);
     }
     if args.first().is_some_and(|command| command == "watch") && args.len() == 3 {
-        let config = serde_json::from_slice(&std::fs::read(&args[1])?)?;
+        let mut config: unibus_services::bus::WatchConfig =
+            serde_json::from_slice(&std::fs::read(&args[1])?)?;
+        config
+            .bus
+            .resolve_token_file(std::path::Path::new(&args[1]));
         println!("{}", unibus_services::bus::watch(config, args[2].parse()?)?);
         return Ok(());
     }
