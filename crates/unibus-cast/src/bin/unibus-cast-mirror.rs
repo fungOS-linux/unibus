@@ -25,12 +25,18 @@ struct Fanout {
     pmt_pid: Option<u16>,
     video_pid: Option<u16>,
     cache: Vec<u8>,
+    bootstrap_ready: bool,
+    nal_tail: Vec<u8>,
+    seen_sps: bool,
+    seen_pps: bool,
+    logged_nals: u32,
 }
 impl Fanout {
     fn ingest(&mut self, bytes: &[u8]) {
         for packet in bytes.chunks_exact(188) {
             if packet[0] != 0x47 {
                 self.cache.clear();
+                self.bootstrap_ready = false;
                 continue;
             }
             let pid = (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
@@ -92,8 +98,15 @@ impl Fanout {
                 && adaptation & 2 != 0
                 && packet[4] > 0
                 && packet[5] & 0x40 != 0;
-            if random_access {
+            // Some real Mac streams omit TS random_access_indicator. Keep a
+            // candidate from a video PES boundary and gate it on actual NALs.
+            let video_start = Some(pid) == self.video_pid && payload_start;
+            if random_access || (video_start && !self.bootstrap_ready && !self.seen_sps) {
                 self.cache.clear();
+                self.bootstrap_ready = false;
+                self.seen_sps = false;
+                self.seen_pps = false;
+                self.nal_tail.clear();
                 if let (Some(pat), Some(pmt)) = (&self.pat, &self.pmt) {
                     self.cache.extend_from_slice(pat);
                     self.cache.extend_from_slice(pmt);
@@ -106,17 +119,56 @@ impl Fanout {
                     }
                 }
             }
+            if Some(pid) == self.video_pid && adaptation & 1 != 0 && offset < 188 {
+                let mut elementary = offset;
+                if payload_start {
+                    if offset + 9 <= 188 && packet[offset..offset + 3] == [0, 0, 1] {
+                        elementary = offset + 9 + usize::from(packet[offset + 8]);
+                    } else {
+                        elementary = 188;
+                    }
+                }
+                if elementary < 188 {
+                    let mut scan = std::mem::take(&mut self.nal_tail);
+                    scan.extend_from_slice(&packet[elementary..]);
+                    for i in 0..scan.len().saturating_sub(3) {
+                        if scan[i..i + 3] == [0, 0, 1] {
+                            let nal = scan[i + 3] & 31;
+                            if self.logged_nals & (1 << nal) == 0 {
+                                eprintln!("mirror H264 observed NAL type={nal}");
+                                self.logged_nals |= 1 << nal;
+                            }
+                            match nal {
+                                7 => self.seen_sps = true,
+                                8 if self.seen_sps => self.seen_pps = true,
+                                5 if self.seen_sps && self.seen_pps && !self.cache.is_empty() => {
+                                    if !self.bootstrap_ready {
+                                        eprintln!("mirror AnnexB SPS/PPS/IDR bootstrap ready");
+                                    }
+                                    self.bootstrap_ready = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    self.nal_tail = scan[scan.len().saturating_sub(3)..].to_vec();
+                }
+            }
             // Null padding feeds Android's byte cache, not the replay budget.
             if !self.cache.is_empty() && pid != 0x1fff {
                 if self.cache.len() + 188 > 2 * 1024 * 1024 {
                     self.cache.clear();
+                    self.bootstrap_ready = false;
+                    self.seen_sps = false;
+                    self.seen_pps = false;
                 } else {
                     self.cache.extend_from_slice(packet);
                 }
             }
         }
         let live = Arc::new(bytes.to_vec());
-        let bootstrap = (!self.cache.is_empty()
+        let bootstrap = (self.bootstrap_ready
+            && !self.cache.is_empty()
             && self.clients.iter().any(|(_, started, _)| !started))
         .then(|| Arc::new(self.cache.clone()));
         self.clients.retain_mut(|(client, started, _)| {
@@ -134,9 +186,10 @@ impl Fanout {
             .is_none_or(|last| last.elapsed() >= Duration::from_secs(10))
         {
             eprintln!(
-                "mirror mux: H264 PID={:?} bootstrap_bytes={} viewers={} waiting={}",
+                "mirror mux: H264 PID={:?} bootstrap_bytes={} bootstrap_ready={} viewers={} waiting={}",
                 self.video_pid,
                 self.cache.len(),
+                self.bootstrap_ready,
                 self.clients.len(),
                 self.clients
                     .iter()
@@ -200,7 +253,7 @@ fn subscriber(mut stream: TcpStream, clients: Subscribers) -> std::io::Result<()
             stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")?;
             return Ok(());
         }
-        let started = !clients.cache.is_empty();
+        let started = clients.bootstrap_ready && !clients.cache.is_empty();
         if started {
             let _ = tx.try_send(Arc::new(clients.cache.clone()));
         }
@@ -388,6 +441,8 @@ mod tests {
         assert!(rx.try_recv().is_err());
         let mut video = vec![0xff; 188];
         video[..6].copy_from_slice(&[0x47, 0x41, 1, 0x30, 1, 0x40]);
+        video[6..15].copy_from_slice(&[0, 0, 1, 0xe0, 0, 0, 0x80, 0, 0]);
+        video[15..27].copy_from_slice(&[0, 0, 1, 0x67, 0, 0, 1, 0x68, 0, 0, 1, 0x65]);
         fanout.ingest(&video);
         let bootstrap = rx.try_recv().unwrap();
         assert_eq!(&bootstrap[..188], &pat);
@@ -401,6 +456,30 @@ mod tests {
         }
         assert!(fanout.cache.len() <= 2 * 1024 * 1024);
         assert!(fanout.cache.is_empty());
+    }
+    #[test]
+    fn annexb_bootstrap_without_ra_and_split_start_code() {
+        let mut fanout = Fanout {
+            video_pid: Some(65),
+            pat: Some(vec![0x47; 188]),
+            pmt: Some(vec![0x47; 188]),
+            ..Fanout::default()
+        };
+        let (tx, rx) = mpsc::sync_channel(32);
+        fanout.clients.push((tx, false, 0));
+        let mut first = vec![0xff; 188];
+        first[..4].copy_from_slice(&[0x47, 0x40, 65, 0x10]);
+        first[4..13].copy_from_slice(&[0, 0, 1, 0xe0, 0, 0, 0x80, 0, 0]);
+        first[13..21].copy_from_slice(&[0, 0, 1, 0x67, 0, 0, 1, 0x68]);
+        first[185..].copy_from_slice(&[0, 0, 1]);
+        fanout.ingest(&first);
+        assert!(rx.try_recv().is_err());
+        let mut next = vec![0xff; 188];
+        next[..5].copy_from_slice(&[0x47, 0, 65, 0x11, 0x65]);
+        fanout.ingest(&next);
+        let startup = rx.try_recv().unwrap();
+        assert_eq!(startup.len(), 188 * 4);
+        assert!(fanout.bootstrap_ready);
     }
     #[test]
     fn http_streams_mux_bytes_and_rejects_other_paths() {

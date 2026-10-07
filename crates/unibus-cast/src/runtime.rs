@@ -98,9 +98,9 @@ impl MirrorConfig {
             // Stock Android MediaPlayer uses byte-based HTTP buffering; null
             // packets bound startup even for an almost-static desktop.
             "bitrate=8000000".into(), "alignment=7".into(), "!".into(), "fdsink".into(), "fd=1".into(), "sync=false".into(),
-            "udpsrc".into(), "address=127.0.0.1".into(), format!("port={}",self.video_rtp_port),
+            "udpsrc".into(), "address=127.0.0.1".into(), "buffer-size=4194304".into(), format!("port={}",self.video_rtp_port),
             "caps=application/x-rtp,media=video,clock-rate=90000,encoding-name=H264,payload=96".into(),
-            "!".into(), "rtpjitterbuffer".into(), "latency=100".into(), "drop-on-latency=true".into(),
+            "!".into(), "rtpjitterbuffer".into(), "latency=100".into(), "drop-on-latency=false".into(),
             "!".into(), "rtph264depay".into(), "wait-for-keyframe=true".into(),
             "!".into(), "h264parse".into(), "config-interval=-1".into(),
             "!".into(), "video/x-h264,stream-format=byte-stream,alignment=au".into(),
