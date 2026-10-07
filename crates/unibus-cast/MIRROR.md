@@ -1,5 +1,27 @@
 # Single AirPlay mirror to Canvas
 
+## Android/FireTV playback
+
+Use `http://WORKER:8099/live.m3u8` for the native Android player, not `/live.ts`.
+Its file-oriented progressive HTTP cache performs backward byte-range reads;
+reopening an endless TS stream cannot reproduce those historical bytes. A small
+cache does not fix that protocol mismatch. Do not fake `206` for a new live GOP.
+
+The worker packages completed, SPS/PPS/IDR-verified GOPs into in-memory HLS
+segments. Durations come from MPEG PES timestamps, including 33-bit wrap.
+Six segments are retained, each capped at 2 MiB (12 MiB total, plus the current
+2 MiB candidate). The playlist waits for two completed segments; missing source
+returns HTTP 503 with `Retry-After: 1`. Expired segments return 404. Finite
+segments have exact lengths and real single byte-range responses; no filesystem,
+unbounded recording, new decoder, or second protocol receiver is involved.
+
+HLS retains the existing worker IP allowlist and HTTP worker limit. Slow segment
+writes do not hold the media ingest lock. Normalized GOP 30 at 30 fps gives
+roughly one-second segments. Android chooses its live-edge buffer, so expect
+seconds of latency rather than sub-100ms mirroring. `/live.ts` remains available
+for compatible sequential readers. Status viewer counts currently describe raw
+TS subscriptions, not finite HLS fetches or proof of TV presentation.
+
 ## Receive status
 
 `GET /status` uses the same explicit private client allowlist and returns typed

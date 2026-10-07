@@ -11,12 +11,14 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use unibus_cast::hls::{HlsWindow, pes_pts};
 use unibus_cast::runtime::{MirrorConfig, allowed_request};
 use unibus_cast::status::{MirrorPhase, MirrorStatus};
 type Subscribers = Arc<Mutex<Fanout>>;
+type Viewer = (SyncSender<Arc<Vec<u8>>>, bool, u64);
 #[derive(Default)]
 struct Fanout {
-    clients: Vec<(SyncSender<Arc<Vec<u8>>>, bool, u64)>,
+    clients: Vec<Viewer>,
     next_client_id: u64,
     logged_tables: bool,
     last_ra_log: Option<Instant>,
@@ -34,6 +36,8 @@ struct Fanout {
     last_video: Option<Instant>,
     normalize_video: bool,
     process_live: bool,
+    hls: HlsWindow,
+    gop_pts: Option<u64>,
 }
 impl Fanout {
     fn expire_video(&mut self, now: Instant) {
@@ -46,6 +50,8 @@ impl Fanout {
             self.seen_sps = false;
             self.seen_pps = false;
             self.nal_tail.clear();
+            self.hls.clear();
+            self.gop_pts = None;
         }
     }
     fn status(&mut self, now: Instant) -> MirrorStatus {
@@ -88,10 +94,12 @@ impl Fanout {
     }
     fn ingest_at(&mut self, bytes: &[u8], now: Instant) {
         self.expire_video(now);
-        for packet in bytes.chunks_exact(188) {
+        for packet in bytes.as_chunks::<188>().0 {
             if packet[0] != 0x47 {
                 self.cache.clear();
                 self.bootstrap_ready = false;
+                self.hls.clear();
+                self.gop_pts = None;
                 continue;
             }
             let pid = (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
@@ -114,7 +122,7 @@ impl Fanout {
                             | usize::from(packet[section + 2]));
                     if end <= 188 && end >= section + 12 {
                         if pid == 0 && packet[section] == 0 {
-                            for program in packet[section + 8..end - 4].chunks_exact(4) {
+                            for program in packet[section + 8..end - 4].as_chunks::<4>().0 {
                                 if program[0] != 0 || program[1] != 0 {
                                     self.pmt_pid = Some(
                                         (u16::from(program[2] & 31) << 8) | u16::from(program[3]),
@@ -160,6 +168,15 @@ impl Fanout {
             // candidate from a video PES boundary and gate it on actual NALs.
             let video_start = Some(pid) == self.video_pid && payload_start;
             if random_access || (video_start && !self.bootstrap_ready && !self.seen_sps) {
+                let pts = (offset < 188).then(|| pes_pts(&packet[offset..])).flatten();
+                if random_access && self.bootstrap_ready {
+                    if let (Some(start), Some(end)) = (self.gop_pts, pts) {
+                        self.hls.push(std::mem::take(&mut self.cache), start, end);
+                    } else {
+                        self.hls.clear();
+                    }
+                }
+                self.gop_pts = pts;
                 self.cache.clear();
                 self.bootstrap_ready = false;
                 self.seen_sps = false;
@@ -219,6 +236,8 @@ impl Fanout {
                     self.bootstrap_ready = false;
                     self.seen_sps = false;
                     self.seen_pps = false;
+                    self.hls.clear();
+                    self.gop_pts = None;
                 } else {
                     self.cache.extend_from_slice(packet);
                 }
@@ -279,6 +298,113 @@ impl Drop for Backend {
     }
 }
 
+fn byte_range(value: &str, length: usize) -> Option<(usize, usize)> {
+    let value = value.strip_prefix("bytes=")?;
+    let (start, end) = value.split_once('-')?;
+    if length == 0 {
+        return None;
+    }
+    if start.is_empty() {
+        let suffix = end.parse::<usize>().ok()?.min(length);
+        return (suffix > 0).then_some((length - suffix, length - 1));
+    }
+    let start = start.parse::<usize>().ok()?;
+    let end = if end.is_empty() {
+        length - 1
+    } else {
+        end.parse::<usize>().ok()?.min(length - 1)
+    };
+    (start <= end && start < length).then_some((start, end))
+}
+
+fn serve_hls(
+    stream: &mut TcpStream,
+    request: &[u8],
+    clients: &Subscribers,
+) -> std::io::Result<bool> {
+    let Ok(raw) = std::str::from_utf8(request) else {
+        return Ok(false);
+    };
+    if !raw.ends_with("\r\n\r\n") {
+        return Ok(false);
+    }
+    let words: Vec<_> = raw
+        .lines()
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .collect();
+    if words.len() != 3 || words[0] != "GET" || !matches!(words[2], "HTTP/1.0" | "HTTP/1.1") {
+        return Ok(false);
+    }
+    let path = words[1];
+    let (mime, body) = {
+        let mut state = clients.lock().unwrap();
+        state.expire_video(Instant::now());
+        if path == "/live.m3u8" {
+            (
+                "application/vnd.apple.mpegurl",
+                state.hls.playlist().map(|p| Arc::new(p.into_bytes())),
+            )
+        } else if let Some(id) = path
+            .strip_prefix("/segments/")
+            .and_then(|p| p.strip_suffix(".ts"))
+        {
+            let segment = id
+                .parse::<u64>()
+                .ok()
+                .filter(|n| n.to_string() == id)
+                .and_then(|n| state.hls.segment(n));
+            ("video/mp2t", segment)
+        } else {
+            return Ok(false);
+        }
+    };
+    let Some(body) = body else {
+        if path == "/live.m3u8" {
+            stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")?;
+        } else {
+            stream.write_all(
+                b"HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            )?;
+        }
+        return Ok(true);
+    };
+    let ranges: Vec<_> = raw
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("range").then_some(value.trim())
+        })
+        .collect();
+    let (status, start, end, content_range) = if ranges.is_empty() {
+        ("200 OK", 0, body.len() - 1, String::new())
+    } else if ranges.len() == 1 && byte_range(ranges[0], body.len()).is_some() {
+        let (start, end) = byte_range(ranges[0], body.len()).unwrap();
+        (
+            "206 Partial Content",
+            start,
+            end,
+            format!("Content-Range: bytes {start}-{end}/{}\r\n", body.len()),
+        )
+    } else {
+        write!(
+            stream,
+            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            body.len()
+        )?;
+        return Ok(true);
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nCache-Control: no-store\r\nAccept-Ranges: bytes\r\n{content_range}Content-Length: {}\r\nConnection: close\r\n\r\n",
+        end - start + 1
+    )?;
+    stream.write_all(&body[start..=end])?;
+    Ok(true)
+}
+
 fn subscriber(mut stream: TcpStream, clients: Subscribers) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
@@ -311,6 +437,9 @@ fn subscriber(mut stream: TcpStream, clients: Subscribers) -> std::io::Result<()
             bytes.len()
         )?;
         stream.write_all(&bytes)?;
+        return Ok(());
+    }
+    if serve_hls(&mut stream, &request, &clients)? {
         return Ok(());
     }
     if !allowed_request(&request) {
@@ -430,10 +559,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(status) = gst.0.try_wait()? {
             return Err(format!("GStreamer exited: {status}").into());
         }
-        if let Some(receiver) = &mut receiver {
-            if let Some(status) = receiver.0.try_wait()? {
-                return Err(format!("UxPlay exited: {status}").into());
-            }
+        if let Some(receiver) = &mut receiver
+            && let Some(status) = receiver.0.try_wait()?
+        {
+            return Err(format!("UxPlay exited: {status}").into());
         }
         if let Ok(error) = failed_rx.try_recv() {
             return Err(format!("media pipe failed: {error}").into());
@@ -476,6 +605,78 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn finite_byte_ranges_are_bounded_and_reject_multiple_ranges() {
+        assert_eq!(byte_range("bytes=3-9", 8), Some((3, 7)));
+        assert_eq!(byte_range("bytes=3-", 8), Some((3, 7)));
+        assert_eq!(byte_range("bytes=-2", 8), Some((6, 7)));
+        assert_eq!(byte_range("bytes=8-", 8), None);
+        assert_eq!(byte_range("bytes=3-2", 8), None);
+        assert_eq!(byte_range("bytes=0-1,4-5", 8), None);
+        assert_eq!(byte_range("bytes=-0", 8), None);
+    }
+    #[test]
+    fn finite_segment_http_response_serves_exact_range() {
+        let mut state = Fanout {
+            last_video: Some(Instant::now()),
+            ..Fanout::default()
+        };
+        state.hls.push(vec![42; 188], 0, 90_000);
+        state.hls.push(vec![43; 188], 90_000, 180_000);
+        let shared = Arc::new(Mutex::new(state));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            assert!(
+                serve_hls(
+                    &mut stream,
+                    b"GET /segments/0.ts HTTP/1.1\r\nRange: bytes=5-9\r\n\r\n",
+                    &shared
+                )
+                .unwrap()
+            );
+        });
+        let mut client = TcpStream::connect(address).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        worker.join().unwrap();
+        let header = String::from_utf8_lossy(&response);
+        assert!(header.contains("206 Partial Content"));
+        assert!(header.contains("Content-Range: bytes 5-9/188"));
+        assert!(response.ends_with(&[42; 5]));
+    }
+    #[test]
+    fn actual_random_access_packets_publish_completed_gops_only() {
+        let mut state = Fanout {
+            video_pid: Some(65),
+            pat: Some(vec![0x47; 188]),
+            pmt: Some(vec![0x47; 188]),
+            ..Fanout::default()
+        };
+        let mut video = vec![0xff; 188];
+        video[..6].copy_from_slice(&[0x47, 0x40, 65, 0x30, 1, 0x40]);
+        video[6..15].copy_from_slice(&[0, 0, 1, 0xe0, 0, 0, 0x80, 0x80, 5]);
+        video[20..32].copy_from_slice(&[0, 0, 1, 0x67, 0, 0, 1, 0x68, 0, 0, 1, 0x65]);
+        for pts in [0_u64, 90_000, 180_000] {
+            video[15..20].copy_from_slice(&[
+                0x21 | ((pts >> 29) as u8 & 14),
+                (pts >> 22) as u8,
+                ((pts >> 14) as u8 & 254) | 1,
+                (pts >> 7) as u8,
+                ((pts as u8) << 1) | 1,
+            ]);
+            state.ingest(&video);
+        }
+        assert!(state.hls.playlist().unwrap().contains("#EXTINF:1.000000,"));
+        assert_eq!(state.hls.segment(0).unwrap().len(), 188 * 3);
+        assert!(
+            state.hls.segment(2).is_none(),
+            "Current GOP must not be served before completion"
+        );
+        state.expire_video(Instant::now() + Duration::from_secs(6));
+        assert!(state.hls.playlist().is_none());
+    }
     #[test]
     fn stale_source_clears_bootstrap_without_disconnecting_viewers() {
         let now = Instant::now();

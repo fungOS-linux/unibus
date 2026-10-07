@@ -1,5 +1,6 @@
 //! Cast session control plane, not a protocol receiver or media transport.
 use serde::{Deserialize, Serialize};
+pub mod hls;
 pub mod runtime;
 pub mod status;
 use stream_descriptors::ClockCorrelationV1;
