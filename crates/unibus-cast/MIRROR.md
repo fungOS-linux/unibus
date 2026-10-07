@@ -1,5 +1,21 @@
 # Single AirPlay mirror to Canvas
 
+## Receive status
+
+`GET /status` uses the same explicit private client allowlist and returns typed
+`MirrorStatus` JSON: process liveness, source liveness, monotonic age of the last
+received video payload, active/waiting viewers, bootstrap readiness/cache size
+and normalization mode. `streaming` means a fresh local video stream with a
+decodable startup candidate, **not** proof of FireTV presentation or A/V sync.
+The helper reserves one additional bounded HTTP worker for status alongside
+four video viewers.
+
+At five seconds without video payload, status becomes `waiting_source` and
+replay/bootstrap state is invalidated. Active viewers remain connected; audio
+and padding do not rejuvenate video health. A returning source must supply a
+fresh bootstrap before new viewers receive video. Quiet senders may legitimately
+trigger this conservative degraded indicator; it is not a fatal process failure.
+
 ## GPU normalization / split receiver
 
 Optional configuration keys default to `receiver_enabled=true`,

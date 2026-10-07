@@ -1,6 +1,7 @@
 //! Cast session control plane, not a protocol receiver or media transport.
 use serde::{Deserialize, Serialize};
 pub mod runtime;
+pub mod status;
 use stream_descriptors::ClockCorrelationV1;
 
 pub const SESSION_KIND: &str = "media.cast.session.v1";

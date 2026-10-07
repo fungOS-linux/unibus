@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 use unibus_cast::runtime::{MirrorConfig, allowed_request};
+use unibus_cast::status::{MirrorPhase, MirrorStatus};
 type Subscribers = Arc<Mutex<Fanout>>;
 #[derive(Default)]
 struct Fanout {
@@ -30,9 +31,63 @@ struct Fanout {
     seen_sps: bool,
     seen_pps: bool,
     logged_nals: u32,
+    last_video: Option<Instant>,
+    normalize_video: bool,
+    process_live: bool,
 }
 impl Fanout {
+    fn expire_video(&mut self, now: Instant) {
+        if self
+            .last_video
+            .is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_secs(5))
+        {
+            self.cache.clear();
+            self.bootstrap_ready = false;
+            self.seen_sps = false;
+            self.seen_pps = false;
+            self.nal_tail.clear();
+        }
+    }
+    fn status(&mut self, now: Instant) -> MirrorStatus {
+        self.expire_video(now);
+        let video_age_ms = self.last_video.map(|last| {
+            now.saturating_duration_since(last)
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64
+        });
+        let source_live = video_age_ms.is_some_and(|age| age < 5000);
+        MirrorStatus {
+            schema_version: 1,
+            phase: if !source_live {
+                MirrorPhase::WaitingSource
+            } else if !self.bootstrap_ready {
+                MirrorPhase::WaitingBootstrap
+            } else {
+                MirrorPhase::Streaming
+            },
+            process_live: self.process_live,
+            source_live,
+            video_age_ms,
+            active_viewers: self
+                .clients
+                .iter()
+                .filter(|(_, started, _)| *started)
+                .count(),
+            waiting_viewers: self
+                .clients
+                .iter()
+                .filter(|(_, started, _)| !started)
+                .count(),
+            bootstrap_ready: self.bootstrap_ready,
+            cache_bytes: self.cache.len(),
+            normalize_video: self.normalize_video,
+        }
+    }
     fn ingest(&mut self, bytes: &[u8]) {
+        self.ingest_at(bytes, Instant::now());
+    }
+    fn ingest_at(&mut self, bytes: &[u8], now: Instant) {
+        self.expire_video(now);
         for packet in bytes.chunks_exact(188) {
             if packet[0] != 0x47 {
                 self.cache.clear();
@@ -47,6 +102,9 @@ impl Fanout {
             } else {
                 4
             };
+            if Some(pid) == self.video_pid && adaptation & 1 != 0 && offset < 188 {
+                self.last_video = Some(now);
+            }
             if payload_start && adaptation & 1 != 0 && offset < 188 {
                 let section = offset + 1 + usize::from(packet[offset]);
                 if section + 12 <= 188 {
@@ -238,6 +296,23 @@ fn subscriber(mut stream: TcpStream, clients: Subscribers) -> std::io::Result<()
         stream.read_exact(&mut byte)?;
         request.push(byte[0]);
     }
+    let status_request = request.len() <= 4096
+        && request.ends_with(b"\r\n\r\n")
+        && matches!(
+            request.split(|byte| *byte == b'\n').next(),
+            Some(b"GET /status HTTP/1.1\r" | b"GET /status HTTP/1.0\r")
+        );
+    if status_request {
+        let status = clients.lock().unwrap().status(Instant::now());
+        let bytes = serde_json::to_vec(&status)?;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+            bytes.len()
+        )?;
+        stream.write_all(&bytes)?;
+        return Ok(());
+    }
     if !allowed_request(&request) {
         stream.write_all(
             b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
@@ -249,6 +324,7 @@ fn subscriber(mut stream: TcpStream, clients: Subscribers) -> std::io::Result<()
     let subscription_clients = clients.clone();
     let _subscription = {
         let mut clients = clients.lock().unwrap();
+        clients.expire_video(Instant::now());
         if clients.clients.len() >= 4 {
             stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")?;
             return Ok(());
@@ -327,7 +403,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
-    let clients: Subscribers = Arc::new(Mutex::new(Fanout::default()));
+    let clients: Subscribers = Arc::new(Mutex::new(Fanout {
+        normalize_video: config.normalize_video,
+        process_live: true,
+        ..Fanout::default()
+    }));
     let workers = Arc::new(AtomicUsize::new(0));
     let fanout = clients.clone();
     let (failed_tx, failed_rx) = mpsc::channel();
@@ -370,7 +450,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let clients = clients.clone();
                 // Bound simultaneous pending header parsers as well as live subscribers.
-                if workers.fetch_add(1, Ordering::SeqCst) >= 4 {
+                // Reserve a fifth bounded worker for status while four viewers
+                // are live. A fifth stream still receives 503 in subscriber.
+                if workers.fetch_add(1, Ordering::SeqCst) >= 5 {
                     workers.fetch_sub(1, Ordering::SeqCst);
                     drop(stream);
                     continue;
@@ -394,6 +476,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stale_source_clears_bootstrap_without_disconnecting_viewers() {
+        let now = Instant::now();
+        let (tx, _rx) = mpsc::sync_channel(32);
+        let mut state = Fanout {
+            last_video: Some(now),
+            bootstrap_ready: true,
+            cache: vec![0x47; 188],
+            process_live: true,
+            normalize_video: true,
+            clients: vec![(tx, true, 0)],
+            ..Fanout::default()
+        };
+        let fresh = state.status(now + Duration::from_millis(4999));
+        assert!(fresh.source_live && fresh.bootstrap_ready && fresh.process_live);
+        assert_eq!(fresh.phase, MirrorPhase::Streaming);
+        let stale = state.status(now + Duration::from_secs(5));
+        assert!(!stale.source_live && !stale.bootstrap_ready);
+        assert_eq!(stale.phase, MirrorPhase::WaitingSource);
+        assert_eq!(stale.video_age_ms, Some(5000));
+        assert_eq!(stale.cache_bytes, 0);
+        assert_eq!(stale.active_viewers, 1);
+        assert!(stale.process_live && stale.normalize_video);
+        let mut audio = vec![0xff; 188];
+        audio[..4].copy_from_slice(&[0x47, 0, 66, 0x10]);
+        state.ingest_at(&audio, now + Duration::from_millis(5500));
+        assert_eq!(
+            state.status(now + Duration::from_millis(5500)).cache_bytes,
+            0
+        );
+        assert!(!state.status(now + Duration::from_millis(5500)).source_live);
+        let mut video = vec![0xff; 188];
+        video[..4].copy_from_slice(&[0x47, 0, 65, 0x10]);
+        state.video_pid = Some(65);
+        state.ingest_at(&video, now + Duration::from_secs(6));
+        let resumed = state.status(now + Duration::from_secs(6));
+        assert!(resumed.source_live && !resumed.bootstrap_ready);
+        assert_eq!(resumed.phase, MirrorPhase::WaitingBootstrap);
+    }
+    #[test]
+    fn status_http_is_typed_and_does_not_register_a_viewer() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let clients: Subscribers = Arc::new(Mutex::new(Fanout::default()));
+        let server_state = clients.clone();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || subscriber(listener.accept().unwrap().0, server_state));
+        let mut viewer = TcpStream::connect(address).unwrap();
+        viewer
+            .write_all(b"GET /status HTTP/1.1\r\nHost: test\r\n\r\n")
+            .unwrap();
+        let mut bytes = Vec::new();
+        viewer.read_to_end(&mut bytes).unwrap();
+        let offset = bytes
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        let status: MirrorStatus = serde_json::from_slice(&bytes[offset..]).unwrap();
+        assert_eq!(status.phase, MirrorPhase::WaitingSource);
+        assert_eq!(status.active_viewers, 0);
+        assert!(!status.source_live);
+        assert!(clients.lock().unwrap().clients.is_empty());
+        server.join().unwrap().unwrap();
+    }
     #[test]
     fn idle_viewer_eof_releases_subscription_without_media() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
