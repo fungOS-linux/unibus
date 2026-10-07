@@ -12,7 +12,106 @@ use std::{
     time::{Duration, Instant},
 };
 use unibus_cast::runtime::{MirrorConfig, allowed_request};
-type Subscribers = Arc<Mutex<Vec<SyncSender<Arc<Vec<u8>>>>>>;
+type Subscribers = Arc<Mutex<Fanout>>;
+#[derive(Default)]
+struct Fanout {
+    clients: Vec<(SyncSender<Arc<Vec<u8>>>, bool)>,
+    pat: Option<Vec<u8>>,
+    pmt: Option<Vec<u8>>,
+    pmt_pid: Option<u16>,
+    video_pid: Option<u16>,
+    cache: Vec<u8>,
+}
+impl Fanout {
+    fn ingest(&mut self, bytes: &[u8]) {
+        for packet in bytes.chunks_exact(188) {
+            if packet[0] != 0x47 {
+                self.cache.clear();
+                continue;
+            }
+            let pid = (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
+            let payload_start = packet[1] & 0x40 != 0;
+            let adaptation = (packet[3] >> 4) & 3;
+            let offset = if adaptation & 2 != 0 {
+                5 + usize::from(packet[4])
+            } else {
+                4
+            };
+            if payload_start && adaptation & 1 != 0 && offset < 188 {
+                let section = offset + 1 + usize::from(packet[offset]);
+                if section + 12 <= 188 {
+                    let end = section
+                        + 3
+                        + ((usize::from(packet[section + 1] & 15) << 8)
+                            | usize::from(packet[section + 2]));
+                    if end <= 188 && end >= section + 12 {
+                        if pid == 0 && packet[section] == 0 {
+                            for program in packet[section + 8..end - 4].chunks_exact(4) {
+                                if program[0] != 0 || program[1] != 0 {
+                                    self.pmt_pid = Some(
+                                        (u16::from(program[2] & 31) << 8) | u16::from(program[3]),
+                                    );
+                                    self.pat = Some(packet.to_vec());
+                                    break;
+                                }
+                            }
+                        } else if Some(pid) == self.pmt_pid && packet[section] == 2 {
+                            let info = (usize::from(packet[section + 10] & 15) << 8)
+                                | usize::from(packet[section + 11]);
+                            let mut stream = section + 12 + info;
+                            while stream + 5 <= end - 4 {
+                                if packet[stream] == 0x1b {
+                                    self.video_pid = Some(
+                                        (u16::from(packet[stream + 1] & 31) << 8)
+                                            | u16::from(packet[stream + 2]),
+                                    );
+                                    self.pmt = Some(packet.to_vec());
+                                    break;
+                                }
+                                stream += 5
+                                    + ((usize::from(packet[stream + 3] & 15) << 8)
+                                        | usize::from(packet[stream + 4]));
+                            }
+                        }
+                    }
+                }
+            }
+            let random_access = Some(pid) == self.video_pid
+                && payload_start
+                && adaptation & 2 != 0
+                && packet[4] > 0
+                && packet[5] & 0x40 != 0;
+            if random_access {
+                self.cache.clear();
+                if let (Some(pat), Some(pmt)) = (&self.pat, &self.pmt) {
+                    self.cache.extend_from_slice(pat);
+                    self.cache.extend_from_slice(pmt);
+                }
+            }
+            if !self.cache.is_empty() {
+                if self.cache.len() + 188 > 2 * 1024 * 1024 {
+                    self.cache.clear();
+                } else {
+                    self.cache.extend_from_slice(packet);
+                }
+            }
+        }
+        let live = Arc::new(bytes.to_vec());
+        let bootstrap = (!self.cache.is_empty()
+            && self.clients.iter().any(|(_, started)| !started))
+        .then(|| Arc::new(self.cache.clone()));
+        self.clients.retain_mut(|(client, started)| {
+            if *started {
+                client.try_send(live.clone()).is_ok()
+            } else if let Some(bootstrap) = &bootstrap {
+                *started = true;
+                client.try_send(bootstrap.clone()).is_ok()
+            } else {
+                true
+            }
+        });
+    }
+}
 struct Backend(Child);
 impl Drop for Backend {
     fn drop(&mut self) {
@@ -44,14 +143,19 @@ fn subscriber(mut stream: TcpStream, clients: Subscribers) -> std::io::Result<()
         )?;
         return Ok(());
     }
-    let (tx, rx) = mpsc::sync_channel(32); // <= 32 * 1316 = 42 KiB per viewer.
+    // One <=2MiB startup GOP, then <=32 * 1316 bytes of live chunks per viewer.
+    let (tx, rx) = mpsc::sync_channel(32);
     {
         let mut clients = clients.lock().unwrap();
-        if clients.len() >= 4 {
+        if clients.clients.len() >= 4 {
             stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")?;
             return Ok(());
         }
-        clients.push(tx);
+        let started = !clients.cache.is_empty();
+        if started {
+            let _ = tx.try_send(Arc::new(clients.cache.clone()));
+        }
+        clients.clients.push((tx, started));
     }
     stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n")?;
     loop {
@@ -96,7 +200,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .stderr(Stdio::inherit())
             .spawn()?,
     );
-    let clients: Subscribers = Arc::new(Mutex::new(Vec::new()));
+    let clients: Subscribers = Arc::new(Mutex::new(Fanout::default()));
     let workers = Arc::new(AtomicUsize::new(0));
     let fanout = clients.clone();
     let (failed_tx, failed_rx) = mpsc::channel();
@@ -107,12 +211,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = failed_tx.send(error);
                 break;
             }
-            let bytes = Arc::new(bytes);
             // Disconnect lagging viewers; never drop arbitrary TS packets inside a stream.
-            fanout
-                .lock()
-                .unwrap()
-                .retain(|client| client.try_send(bytes.clone()).is_ok());
+            fanout.lock().unwrap().ingest(&bytes);
         }
     });
     eprintln!(
@@ -166,11 +266,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     #[test]
+    fn join_waits_for_video_random_access_and_caches_tables_and_gop() {
+        let mut fanout = Fanout::default();
+        let (tx, rx) = mpsc::sync_channel(32);
+        fanout.clients.push((tx, false));
+        let mut audio = vec![0xff; 188];
+        audio[0] = 0x47;
+        audio[1] = 1;
+        audio[2] = 2;
+        audio[3] = 0x10;
+        fanout.ingest(&audio);
+        assert!(rx.try_recv().is_err());
+        let mut pat = vec![0xff; 188];
+        pat[..5].copy_from_slice(&[0x47, 0x40, 0, 0x10, 0]);
+        pat[5..21].copy_from_slice(&[0, 0xb0, 13, 0, 1, 0xc1, 0, 0, 0, 1, 0xe1, 0, 0, 0, 0, 0]);
+        let mut pmt = vec![0xff; 188];
+        pmt[..5].copy_from_slice(&[0x47, 0x41, 0, 0x10, 0]);
+        pmt[5..26].copy_from_slice(&[
+            2, 0xb0, 18, 0, 1, 0xc1, 0, 0, 0xe1, 1, 0xf0, 0, 0x1b, 0xe1, 1, 0xf0, 0, 0, 0, 0, 0,
+        ]);
+        fanout.ingest(&pat);
+        fanout.ingest(&pmt);
+        assert!(rx.try_recv().is_err());
+        let mut video = vec![0xff; 188];
+        video[..6].copy_from_slice(&[0x47, 0x41, 1, 0x30, 1, 0x40]);
+        fanout.ingest(&video);
+        let bootstrap = rx.try_recv().unwrap();
+        assert_eq!(&bootstrap[..188], &pat);
+        assert_eq!(&bootstrap[188..376], &pmt);
+        assert_eq!(&bootstrap[376..], &video);
+        fanout.ingest(&audio);
+        assert_eq!(&*rx.try_recv().unwrap(), &audio);
+        assert_eq!(fanout.cache.len(), 752);
+        for _ in 0..12_000 {
+            fanout.ingest(&audio);
+        }
+        assert!(fanout.cache.len() <= 2 * 1024 * 1024);
+        assert!(fanout.cache.is_empty());
+    }
+    #[test]
     fn http_streams_mux_bytes_and_rejects_other_paths() {
         for (path, accepted) in [("/live.ts", true), ("/control", false)] {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
-            let clients: Subscribers = Arc::new(Mutex::new(Vec::new()));
+            let clients: Subscribers = Arc::new(Mutex::new(Fanout::default()));
             let server_clients = clients.clone();
             let server =
                 thread::spawn(move || subscriber(listener.accept().unwrap().0, server_clients));
@@ -187,13 +326,14 @@ mod tests {
             }
             if accepted {
                 assert!(header.starts_with(b"HTTP/1.1 200"));
-                clients.lock().unwrap()[0]
+                clients.lock().unwrap().clients[0]
+                    .0
                     .send(Arc::new(vec![0x47; 1316]))
                     .unwrap();
                 let mut bytes = [0; 1316];
                 viewer.read_exact(&mut bytes).unwrap();
                 assert_eq!(bytes, [0x47; 1316]);
-                clients.lock().unwrap().clear();
+                clients.lock().unwrap().clients.clear();
             } else {
                 assert!(header.starts_with(b"HTTP/1.1 400"));
             }
