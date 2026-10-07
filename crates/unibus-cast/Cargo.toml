@@ -6,7 +6,5 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
-stream-descriptors = { path = "../stream-descriptors" }
-
-[dev-dependencies]
 serde_json.workspace = true
+stream-descriptors = { path = "../stream-descriptors" }
