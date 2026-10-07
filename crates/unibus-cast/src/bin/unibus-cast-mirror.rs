@@ -15,7 +15,11 @@ use unibus_cast::runtime::{MirrorConfig, allowed_request};
 type Subscribers = Arc<Mutex<Fanout>>;
 #[derive(Default)]
 struct Fanout {
-    clients: Vec<(SyncSender<Arc<Vec<u8>>>, bool)>,
+    clients: Vec<(SyncSender<Arc<Vec<u8>>>, bool, u64)>,
+    next_client_id: u64,
+    logged_tables: bool,
+    last_ra_log: Option<Instant>,
+    last_state_log: Option<Instant>,
     pat: Option<Vec<u8>>,
     pmt: Option<Vec<u8>>,
     pmt_pid: Option<u16>,
@@ -76,6 +80,13 @@ impl Fanout {
                     }
                 }
             }
+            if !self.logged_tables && self.pat.is_some() && self.pmt.is_some() {
+                eprintln!(
+                    "mirror tables ready: PMT PID={:?} H264 PID={:?}",
+                    self.pmt_pid, self.video_pid
+                );
+                self.logged_tables = true;
+            }
             let random_access = Some(pid) == self.video_pid
                 && payload_start
                 && adaptation & 2 != 0
@@ -86,6 +97,13 @@ impl Fanout {
                 if let (Some(pat), Some(pmt)) = (&self.pat, &self.pmt) {
                     self.cache.extend_from_slice(pat);
                     self.cache.extend_from_slice(pmt);
+                    if self
+                        .last_ra_log
+                        .is_none_or(|last| last.elapsed() >= Duration::from_secs(5))
+                    {
+                        eprintln!("mirror video random access: bootstrap initialized PID={pid}");
+                        self.last_ra_log = Some(Instant::now());
+                    }
                 }
             }
             // Null padding feeds Android's byte cache, not the replay budget.
@@ -99,9 +117,9 @@ impl Fanout {
         }
         let live = Arc::new(bytes.to_vec());
         let bootstrap = (!self.cache.is_empty()
-            && self.clients.iter().any(|(_, started)| !started))
+            && self.clients.iter().any(|(_, started, _)| !started))
         .then(|| Arc::new(self.cache.clone()));
-        self.clients.retain_mut(|(client, started)| {
+        self.clients.retain_mut(|(client, started, _)| {
             if *started {
                 client.try_send(live.clone()).is_ok()
             } else if let Some(bootstrap) = &bootstrap {
@@ -111,9 +129,38 @@ impl Fanout {
                 true
             }
         });
+        if self
+            .last_state_log
+            .is_none_or(|last| last.elapsed() >= Duration::from_secs(10))
+        {
+            eprintln!(
+                "mirror mux: H264 PID={:?} bootstrap_bytes={} viewers={} waiting={}",
+                self.video_pid,
+                self.cache.len(),
+                self.clients.len(),
+                self.clients
+                    .iter()
+                    .filter(|(_, started, _)| !started)
+                    .count()
+            );
+            self.last_state_log = Some(Instant::now());
+        }
     }
 }
 struct Backend(Child);
+struct Subscription {
+    clients: Subscribers,
+    id: u64,
+}
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        self.clients
+            .lock()
+            .unwrap()
+            .clients
+            .retain(|(_, _, id)| *id != self.id);
+    }
+}
 impl Drop for Backend {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -144,9 +191,10 @@ fn subscriber(mut stream: TcpStream, clients: Subscribers) -> std::io::Result<()
         )?;
         return Ok(());
     }
-    // One <=2MiB startup GOP, then <=32 * 1316 bytes of live chunks per viewer.
-    let (tx, rx) = mpsc::sync_channel(32);
-    {
+    // One <=2MiB startup GOP, then <=512 * 1316 live bytes (~0.67s at 8Mbps).
+    let (tx, rx) = mpsc::sync_channel(512);
+    let subscription_clients = clients.clone();
+    let _subscription = {
         let mut clients = clients.lock().unwrap();
         if clients.clients.len() >= 4 {
             stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")?;
@@ -156,13 +204,34 @@ fn subscriber(mut stream: TcpStream, clients: Subscribers) -> std::io::Result<()
         if started {
             let _ = tx.try_send(Arc::new(clients.cache.clone()));
         }
-        clients.clients.push((tx, started));
-    }
+        let id = clients.next_client_id;
+        clients.next_client_id = clients.next_client_id.wrapping_add(1);
+        clients.clients.push((tx, started, id));
+        Subscription {
+            clients: subscription_clients,
+            id,
+        }
+    };
     stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n")?;
     loop {
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(chunk) => stream.write_all(&chunk)?,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                stream.set_read_timeout(Some(Duration::from_millis(50)))?;
+                match stream.peek(&mut [0_u8]) {
+                    Ok(0) => break,
+                    Ok(_) => break, // No pipelined requests or request bodies.
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
@@ -267,10 +336,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     #[test]
+    fn idle_viewer_eof_releases_subscription_without_media() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let clients: Subscribers = Arc::new(Mutex::new(Fanout::default()));
+        let state = clients.clone();
+        let mut viewer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result = subscriber(listener.accept().unwrap().0, state);
+            done_tx.send(result).unwrap();
+        });
+        viewer
+            .write_all(b"GET /live.ts HTTP/1.1\r\nHost: test\r\n\r\n")
+            .unwrap();
+        let mut header = Vec::new();
+        while !header.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            viewer.read_exact(&mut byte).unwrap();
+            header.push(byte[0]);
+        }
+        assert_eq!(clients.lock().unwrap().clients.len(), 1);
+        drop(viewer);
+        done_rx
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap()
+            .unwrap();
+        assert!(clients.lock().unwrap().clients.is_empty());
+    }
+    #[test]
     fn join_waits_for_video_random_access_and_caches_tables_and_gop() {
         let mut fanout = Fanout::default();
         let (tx, rx) = mpsc::sync_channel(32);
-        fanout.clients.push((tx, false));
+        fanout.clients.push((tx, false, 0));
         let mut audio = vec![0xff; 188];
         audio[0] = 0x47;
         audio[1] = 1;

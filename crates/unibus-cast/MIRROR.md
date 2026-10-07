@@ -43,11 +43,12 @@ L16 at 44.1 kHz, not the existing Isochrone 48 kHz/L24 baseline. No GPU video
 decode/reencode occurs on this host. Only H.264 screen mirroring is qualified by
 this initial graph; H.265 and YouTube native HLS are not handled.
 
-HTTP uses at most four worker/viewer connections and 32 × 1316-byte queued chunks
+HTTP uses at most four worker/viewer connections and 512 × 1316-byte queued chunks
 per viewer, plus a bounded 2 MiB video startup replay. First media bytes wait for
 PAT/PMT and a video random-access frame, preventing audio-only player detection.
 Late viewers atomically replay the latest complete GOP before live bytes. When
 the GOP exceeds the cap, new viewers wait for the next random-access frame.
+Idle closed viewers are detected and removed even before media arrives.
 Lagging viewers disconnect instead of losing arbitrary TS packets;
 clients need a new connection to recover. Headers and socket writes time out,
 and idle streams wait for a sender without closing. Immediate first frame is not guaranteed.
