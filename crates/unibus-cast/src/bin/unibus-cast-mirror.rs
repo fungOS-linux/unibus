@@ -88,7 +88,8 @@ impl Fanout {
                     self.cache.extend_from_slice(pmt);
                 }
             }
-            if !self.cache.is_empty() {
+            // Null padding feeds Android's byte cache, not the replay budget.
+            if !self.cache.is_empty() && pid != 0x1fff {
                 if self.cache.len() + 188 > 2 * 1024 * 1024 {
                     self.cache.clear();
                 } else {

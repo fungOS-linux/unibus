@@ -53,6 +53,12 @@ clients need a new connection to recover. Headers and socket writes time out,
 and idle streams wait for a sender without closing. Immediate first frame is not guaranteed.
 No media archive or unbounded replay buffer exists.
 
+The MPEG-TS mux currently pads to an 8 Mbit/s baseline to fill stock Android's
+byte-based HTTP startup cache promptly on static desktops. Null packets are
+excluded from the GOP replay budget. This is a compatibility workaround, not
+extra encoded image quality; a bounded Android live-player cache should replace
+the padding when that client is updated.
+
 Independent RTP branches use arrival-clock timestamps/jitter buffers; this is
 **not verified A/V synchronization**. TV-local decode handles normal muxed
 playback, but measure actual skew on hardware. The existing Isochrone split-path
