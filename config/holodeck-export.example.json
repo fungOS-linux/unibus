@@ -1,0 +1,16 @@
+{
+  "mode": "export",
+  "bind": "100.80.85.86:16788",
+  "tls": {
+    "ca": "/home/ajmwagar/.config/unibus-holodeck/ca.pem",
+    "certificate": "/home/ajmwagar/.config/unibus-holodeck/node.pem",
+    "key": "/home/ajmwagar/.config/unibus-holodeck/node-key.pem",
+    "expected_peer_binding": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "rooms": [{
+    "room_id": "agora-one/holodeck",
+    "label": "Wagar House",
+    "target": "127.0.0.1:6789",
+    "discovery": "127.0.0.1:6788"
+  }]
+}

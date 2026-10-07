@@ -784,6 +784,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
+name = "holodeck-discovery"
+version = "0.1.0"
+source = "git+https://github.com/ajmwagar/holodeck.git?rev=fbea06f9b62f6a3c8131d4e3c745cd39fcc5712a#fbea06f9b62f6a3c8131d4e3c745cd39fcc5712a"
+
+[[package]]
 name = "hound"
 version = "3.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2049,6 +2054,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "rusty_enet"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1c0b43e27d8d86bb3a15b9eac232b6d78a06afee258a9861deb5a0d15b65c33"
+dependencies = [
+ "js-sys",
+]
+
+[[package]]
 name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2775,6 +2789,23 @@ dependencies = [
  "serde",
  "serde_json",
  "stream-descriptors",
+ "tempfile",
+ "tokio",
+ "unibus-quic",
+]
+
+[[package]]
+name = "unibus-holodeck"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "holodeck-discovery",
+ "ipnet",
+ "quinn",
+ "rcgen",
+ "rusty_enet",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "unibus-quic",

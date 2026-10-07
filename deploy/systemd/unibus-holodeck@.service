@@ -1,0 +1,17 @@
+[Unit]
+Description=Unibus Holodeck %i bridge
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/unibus-holodeck run %h/.config/unibus-holodeck/%i.json
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+UMask=0077
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryMax=128M
+TasksMax=128
+
+[Install]
+WantedBy=default.target

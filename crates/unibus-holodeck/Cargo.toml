@@ -1,0 +1,20 @@
+[package]
+name = "unibus-holodeck"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ipnet = { version = "2", features = ["serde"] }
+tokio = { workspace = true, features = ["net", "time"] }
+quinn.workspace = true
+unibus-quic.workspace = true
+holodeck-discovery = { git = "https://github.com/ajmwagar/holodeck.git", rev = "fbea06f9b62f6a3c8131d4e3c745cd39fcc5712a" }
+rusty_enet = "0.4.0"
+
+[dev-dependencies]
+rcgen = "0.14"
+tempfile.workspace = true

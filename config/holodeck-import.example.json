@@ -1,0 +1,18 @@
+{
+  "mode": "import",
+  "lan_address": "192.168.1.9",
+  "allowed_clients": ["192.168.1.9"],
+  "allowed_subnets": [],
+  "tls": {
+    "ca": "/home/ajmwagar/.config/unibus-holodeck/ca.pem",
+    "certificate": "/home/ajmwagar/.config/unibus-holodeck/node.pem",
+    "key": "/home/ajmwagar/.config/unibus-holodeck/node-key.pem",
+    "expected_peer_binding": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "rooms": [{
+    "room_id": "agora-one/holodeck",
+    "remote": "100.80.85.86:16788",
+    "server_name": "unibus-holodeck-agora",
+    "lan_bind": "192.168.1.9:6790"
+  }]
+}

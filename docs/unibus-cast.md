@@ -73,3 +73,26 @@ does not introduce another clock servo.
    presentation evidence meets the selected budget.
 
 No deployments or active services were changed by the contract-only slice.
+
+## Requested next product slice
+
+After Holodeck bridging, support YouTube playback and AirPlay video in a Canvas
+tile, with authenticated controls and presence-selected destinations. Treat a
+YouTube URL playback backend separately from AirPlay mirroring; neither implies
+compatibility with arbitrary Google Cast sender applications or protected media.
+Presence proposes the authorized destination, not permission to take over a screen.
+Require a stable session identity across destination changes and surface any
+interruption or unsupported route explicitly.
+
+Allow multiple session IDs and multiple independent stream bindings in the
+contract. A receiver may initially admit only one session, but must report that
+capacity and reject or explicitly negotiate replacement rather than silently
+stealing the active session. Canvas and Holodeck should consume the same existing
+media descriptor and timestamps, through their respective renderer adapters;
+do not duplicate capture/encoding or room transport just to add a second viewer.
+Bound fan-out and per-viewer queues. Keep control ownership separate from view
+subscription, and enforce route grants for both.
+
+Qualify FireTV-local audio first. External Isochrone speakers remain optional:
+show unverified/degraded sync until measured presentation timing meets a declared
+budget. Do not duplicate audio across destinations without an explicit choice.

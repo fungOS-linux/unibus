@@ -1,0 +1,17 @@
+[Unit]
+Description=Private loopback Holodeck room host
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/holodeck-server --bind 127.0.0.1:6789
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+UMask=0077
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryMax=256M
+TasksMax=128
+
+[Install]
+WantedBy=default.target
