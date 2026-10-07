@@ -9,6 +9,7 @@ implement Google Cast, publish session contracts, or drive Canvas workspaces.
   "listen": "192.168.2.74:8099",
   "allowed_clients": ["192.168.2.97"],
   "receiver_name": "fungOS Canvas",
+  "receiver_device_id": "02:46:50:4c:74:01",
   "receiver_port": 35100,
   "video_rtp_port": 35200,
   "audio_rtp_port": 35201
@@ -28,6 +29,8 @@ client allowlist to authenticate senders.
 
 New devices require a random PIN (`-pin`); `-reg` retains paired clients in the
 receiver owner's `~/.uxplay.register`, so returning devices need not pair again.
+An explicit stable receiver device ID and `-key` persistent private key preserve
+receiver identity across restarts. Keep the registration and key owner-private.
 UxPlay displays the PIN in owner process output; relay it privately to the sender.
 The helper ignores implicit UxPlay startup files with `-rc /dev/null`, avoids
 static password argv/config, and does not expose PINs over HTTP.

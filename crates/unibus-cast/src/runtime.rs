@@ -8,6 +8,7 @@ pub struct MirrorConfig {
     pub listen: SocketAddrV4,
     pub allowed_clients: Vec<Ipv4Addr>,
     pub receiver_name: String,
+    pub receiver_device_id: String,
     pub receiver_port: u16,
     pub video_rtp_port: u16,
     pub audio_rtp_port: u16,
@@ -29,6 +30,10 @@ impl MirrorConfig {
             || self.receiver_name.chars().any(char::is_control)
         {
             return Err("receiver name invalid".into());
+        }
+        let octets: Vec<_> = self.receiver_device_id.split(':').collect();
+        if octets.len() != 6 || octets.iter().any(|v| v.len() != 2 || u8::from_str_radix(v, 16).is_err()) {
+            return Err("receiver device ID must be a stable MAC-format identity".into());
         }
         if !(1024..=65533).contains(&self.receiver_port)
             || self.video_rtp_port < 1024
@@ -61,6 +66,9 @@ impl MirrorConfig {
             "/dev/null".into(),
             "-n".into(),
             self.receiver_name.clone(),
+            "-m".into(),
+            self.receiver_device_id.clone(),
+            "-key".into(),
             "-p".into(),
             self.receiver_port.to_string(),
             "-pin".into(),
@@ -130,6 +138,7 @@ mod tests {
             listen: "192.168.2.74:8099".parse().unwrap(),
             allowed_clients: vec!["192.168.2.97".parse().unwrap()],
             receiver_name: "fungOS Mirror".into(),
+            receiver_device_id: "02:46:50:4c:00:01".into(),
             receiver_port: 35100,
             video_rtp_port: 35200,
             audio_rtp_port: 35201,
