@@ -12,6 +12,26 @@
   "lease_ms": 30000,
   "providers": [
     {
+      "provider_id": "studio-browser",
+      "node_id": "darwin-averys-mac-studio",
+      "producer_id": "studio-mcp-provider",
+      "endpoint": "http://127.0.0.1:8082/mcp",
+      "mutation_overrides": {
+        "browser_snapshot": "read_only",
+        "browser_screenshot": "read_only",
+        "browser_get_console_logs": "read_only",
+        "browser_wait": "read_only",
+        "browser_navigate": "mutating",
+        "browser_go_back": "mutating",
+        "browser_go_forward": "mutating",
+        "browser_click": "mutating",
+        "browser_hover": "mutating",
+        "browser_press_key": "mutating",
+        "browser_select_option": "mutating",
+        "browser_type": "mutating"
+      }
+    },
+    {
       "provider_id": "studio-blender",
       "node_id": "darwin-averys-mac-studio",
       "producer_id": "studio-mcp-provider",
