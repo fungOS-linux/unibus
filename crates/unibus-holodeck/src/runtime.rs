@@ -1,4 +1,4 @@
-use crate::{MAX_CLIENTS, Reassembler, send_datagram};
+use crate::{MAX_CLIENTS, Reassembler, RoomConnection, send_datagram};
 use anyhow::{Context, Result, ensure};
 use holodeck_discovery::{DISCOVERY_PORT, PROBE, decode_advert, decode_probe, encode_advert};
 use serde::{Deserialize, Serialize};
@@ -73,10 +73,27 @@ fn default_discovery_port() -> u16 {
     DISCOVERY_PORT
 }
 
+pub(crate) fn validate_room_ids<'a>(ids: impl IntoIterator<Item = &'a str>) -> Result<()> {
+    let ids: Vec<&str> = ids.into_iter().collect();
+    ensure!(
+        ids.iter().all(|id| !id.is_empty()
+            && id.len() <= 128
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_/.".contains(&b))),
+        "invalid room ID"
+    );
+    ensure!(
+        ids.iter().collect::<std::collections::BTreeSet<_>>().len() == ids.len(),
+        "duplicate room ID"
+    );
+    Ok(())
+}
+
 #[derive(Clone)]
-struct ClientPolicy {
-    addresses: Vec<Ipv4Addr>,
-    subnets: Vec<ipnet::Ipv4Net>,
+pub(crate) struct ClientPolicy {
+    pub(crate) addresses: Vec<Ipv4Addr>,
+    pub(crate) subnets: Vec<ipnet::Ipv4Net>,
 }
 
 impl ClientPolicy {
@@ -88,7 +105,7 @@ impl ClientPolicy {
     }
 }
 
-fn private_ip(ip: IpAddr) -> bool {
+pub(crate) fn private_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => {
             ip.is_private()
@@ -178,18 +195,7 @@ impl Config {
                 (tls, rooms.iter().map(|r| r.room_id.as_str()).collect())
             }
         };
-        ensure!(
-            ids.iter().all(|id| !id.is_empty()
-                && id.len() <= 128
-                && id
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"-_/.".contains(&b))),
-            "invalid room ID"
-        );
-        ensure!(
-            ids.iter().collect::<std::collections::BTreeSet<_>>().len() == ids.len(),
-            "duplicate room ID"
-        );
+        validate_room_ids(ids)?;
         ensure!(
             tls.expected_peer_binding.starts_with("sha256:")
                 && tls.expected_peer_binding.len() == 71
@@ -206,7 +212,7 @@ fn material(tls: &Tls) -> Result<unibus_quic::PeerCredentialMaterial> {
     PemPeerCredentials::new(&tls.ca, &tls.certificate, &tls.key).load()
 }
 
-async fn host_ready(room: &Export) -> bool {
+pub(crate) async fn host_ready(room: &Export) -> bool {
     let result: Result<bool> = async {
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
         socket.connect(room.discovery).await?;
@@ -220,14 +226,19 @@ async fn host_ready(room: &Export) -> bool {
     result.unwrap_or(false)
 }
 
-async fn read_json<T: for<'a> Deserialize<'a>>(stream: &mut quinn::RecvStream) -> Result<T> {
+async fn read_json<T: for<'a> Deserialize<'a>>(
+    stream: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+) -> Result<T> {
     let length = stream.read_u32().await? as usize;
     ensure!(length > 0 && length <= 4096, "control frame too large");
     let mut bytes = vec![0; length];
     stream.read_exact(&mut bytes).await?;
     Ok(serde_json::from_slice(&bytes)?)
 }
-async fn write_json(stream: &mut quinn::SendStream, value: &impl Serialize) -> Result<()> {
+async fn write_json(
+    stream: &mut (dyn tokio::io::AsyncWrite + Unpin + Send),
+    value: &impl Serialize,
+) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
     ensure!(bytes.len() <= 4096, "control frame too large");
     stream.write_u32(bytes.len() as u32).await?;
@@ -271,11 +282,14 @@ async fn serve(peer: unibus_quic::QuicPeer, rooms: Vec<Export>, expected: String
         certificate_key_binding(&peer.peer_certificate()?) == expected,
         "importer certificate binding denied"
     );
-    let connection = peer.connection();
+    serve_connection(RoomConnection::Quic(peer.connection().clone()), rooms).await
+}
+
+pub(crate) async fn serve_connection(connection: RoomConnection, rooms: Vec<Export>) -> Result<()> {
     let (mut tx, mut rx) =
         tokio::time::timeout(Duration::from_secs(5), connection.accept_bi()).await??;
     let request: Request =
-        tokio::time::timeout(Duration::from_secs(5), read_json(&mut rx)).await??;
+        tokio::time::timeout(Duration::from_secs(5), read_json(&mut *rx)).await??;
     ensure!(request.version == 1, "unsupported relay version");
     let room = rooms
         .into_iter()
@@ -300,7 +314,7 @@ async fn serve(peer: unibus_quic::QuicPeer, rooms: Vec<Export>, expected: String
                 ready = host_ready(&room).await;
                 if !ready { clients.clear(); }
                 clients.retain(|_, c| c.last_seen.elapsed() < Duration::from_secs(60) && !c.task.is_finished());
-                tokio::time::timeout(Duration::from_secs(2), write_json(&mut tx, &Lease { version: 1, room_id: room.room_id.clone(), label: room.label.clone(), generation: generation.clone(), ready, ttl_ms: 6000 })).await??;
+                tokio::time::timeout(Duration::from_secs(2), write_json(&mut *tx, &Lease { version: 1, room_id: room.room_id.clone(), label: room.label.clone(), generation: generation.clone(), ready, ttl_ms: 6000 })).await??;
             }
             incoming = connection.read_datagram() => {
                 let packet = incoming?;
@@ -463,94 +477,143 @@ pub async fn run(config: Config) -> Result<()> {
             tls,
             rooms,
         } => {
-            ensure!(
-                cfg!(target_os = "linux") || lan_address.is_loopback(),
-                "LAN broadcast republishing currently requires Linux; other platforms support loopback tests only"
-            );
-            let discovery = UdpSocket::bind((lan_address, discovery_port))
+            let rooms = rooms
+                .into_iter()
+                .map(|room| LocalImport {
+                    room_id: room.room_id.clone(),
+                    lan_bind: room.lan_bind,
+                    quic: Some(room),
+                })
+                .collect();
+            run_import_lan(
+                lan_address,
+                discovery_port,
+                allowed_clients,
+                allowed_subnets,
+                rooms,
+                ImportTransport::Quic(tls),
+            )
+            .await
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum ImportTransport {
+    Quic(Tls),
+    #[cfg(feature = "iroh")]
+    Iroh(crate::iroh_runtime::Client),
+}
+
+pub(crate) struct LocalImport {
+    pub room_id: String,
+    pub lan_bind: SocketAddr,
+    pub quic: Option<Import>,
+}
+
+pub(crate) async fn run_import_lan(
+    lan_address: Ipv4Addr,
+    discovery_port: u16,
+    allowed_clients: Vec<Ipv4Addr>,
+    allowed_subnets: Vec<ipnet::Ipv4Net>,
+    rooms: Vec<LocalImport>,
+    transport: ImportTransport,
+) -> Result<()> {
+    ensure!(
+        cfg!(target_os = "linux") || lan_address.is_loopback(),
+        "LAN broadcast republishing currently requires Linux; other platforms support loopback tests only"
+    );
+    let discovery = UdpSocket::bind((lan_address, discovery_port))
+        .await
+        .context("bind discovery (one responder owner per LAN address)")?;
+    // Linux's unicast-address-bound socket does not receive limited
+    // broadcast probes. A second, exact broadcast-address socket keeps
+    // the LAN reply source stable without a wildcard bind or SO_REUSE.
+    // The native loopback room responder can retain its own address.
+    let broadcast = if cfg!(target_os = "linux") {
+        Some(
+            UdpSocket::bind((Ipv4Addr::BROADCAST, discovery_port))
                 .await
-                .context("bind discovery (one responder owner per LAN address)")?;
-            // Linux's unicast-address-bound socket does not receive limited
-            // broadcast probes. A second, exact broadcast-address socket keeps
-            // the LAN reply source stable without a wildcard bind or SO_REUSE.
-            // The native loopback room responder can retain its own address.
-            let broadcast = if cfg!(target_os = "linux") {
-                Some(
-                    UdpSocket::bind((Ipv4Addr::BROADCAST, discovery_port))
-                        .await
-                        .context(
-                            "bind limited-broadcast discovery (one import process per host)",
-                        )?,
-                )
-            } else {
-                None
-            };
-            let mut advertisements = Vec::new();
-            let client_policy = ClientPolicy {
-                addresses: allowed_clients,
-                subnets: allowed_subnets,
-            };
-            let mut workers = tokio::task::JoinSet::new();
-            for room in rooms {
-                let socket = Arc::new(UdpSocket::bind(room.lan_bind).await?);
-                let ready = Arc::new(AtomicBool::new(false));
-                advertisements.push((room.lan_bind.port(), ready.clone()));
-                let tls = tls.clone();
-                let clients = client_policy.clone();
-                workers.spawn(async move {
-                    loop {
-                        if let Err(e) =
-                            import_session(&room, &tls, &clients, socket.clone(), ready.clone())
-                                .await
-                        {
-                            eprintln!("room {} disconnected: {e:#}", room.room_id);
-                        }
-                        ready.store(false, Ordering::Release);
-                        tokio::time::sleep(Duration::from_secs(2)).await;
-                    }
-                });
-            }
-            eprintln!(
-                "holodeck LAN responder {lan_address}:{discovery_port}; {} imports",
-                advertisements.len()
-            );
-            let mut bytes = [0; 64];
-            let mut broadcast_bytes = [0; 64];
-            let mut count = 0;
-            let mut since = Instant::now();
+                .context("bind limited-broadcast discovery (one import process per host)")?,
+        )
+    } else {
+        None
+    };
+    let mut advertisements = Vec::new();
+    let client_policy = ClientPolicy {
+        addresses: allowed_clients,
+        subnets: allowed_subnets,
+    };
+    let mut workers = tokio::task::JoinSet::new();
+    for room in rooms {
+        let socket = Arc::new(UdpSocket::bind(room.lan_bind).await?);
+        let ready = Arc::new(AtomicBool::new(false));
+        advertisements.push((room.lan_bind.port(), ready.clone()));
+        let transport = transport.clone();
+        let clients = client_policy.clone();
+        workers.spawn(async move {
             loop {
-                let (n, source, is_broadcast) = tokio::select! {
-                    result = discovery.recv_from(&mut bytes) => {
-                        let (n, source) = result?; (n, source, false)
+                let result = match &transport {
+                    ImportTransport::Quic(tls) => match room.quic.as_ref() {
+                        Some(quic) => {
+                            import_session(quic, tls, &clients, socket.clone(), ready.clone()).await
+                        }
+                        None => Err(anyhow::anyhow!("QUIC room has no remote address")),
+                    },
+                    #[cfg(feature = "iroh")]
+                    ImportTransport::Iroh(client) => {
+                        client
+                            .import_session(&room.room_id, &clients, socket.clone(), ready.clone())
+                            .await
                     }
-                    result = async {
-                        if let Some(socket) = &broadcast { socket.recv_from(&mut broadcast_bytes).await }
-                        else { std::future::pending::<std::io::Result<(usize, SocketAddr)>>().await }
-                    } => {
-                        let (n, source) = result?; (n, source, true)
-                    }
-                    result = workers.join_next() => { anyhow::bail!("import worker unexpectedly exited: {result:?}"); }
                 };
-                let packet = if is_broadcast {
-                    &broadcast_bytes[..n]
-                } else {
-                    &bytes[..n]
-                };
-                if since.elapsed() >= Duration::from_secs(1) {
-                    count = 0;
-                    since = Instant::now();
+                if let Err(e) = result {
+                    eprintln!("room {} disconnected: {e:#}", room.room_id);
                 }
-                count += 1;
-                if count > 64 || !client_policy.allows(source.ip()) || !decode_probe(packet) {
-                    continue;
-                }
-                for (port, ready) in &advertisements {
-                    if ready.load(Ordering::Acquire) {
-                        discovery
-                            .send_to(&encode_advert(*port).expect("validated port"), source)
-                            .await?;
-                    }
-                }
+                ready.store(false, Ordering::Release);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        });
+    }
+    eprintln!(
+        "holodeck LAN responder {lan_address}:{discovery_port}; {} imports",
+        advertisements.len()
+    );
+    let mut bytes = [0; 64];
+    let mut broadcast_bytes = [0; 64];
+    let mut count = 0;
+    let mut since = Instant::now();
+    loop {
+        let (n, source, is_broadcast) = tokio::select! {
+            result = discovery.recv_from(&mut bytes) => {
+                let (n, source) = result?; (n, source, false)
+            }
+            result = async {
+                if let Some(socket) = &broadcast { socket.recv_from(&mut broadcast_bytes).await }
+                else { std::future::pending::<std::io::Result<(usize, SocketAddr)>>().await }
+            } => {
+                let (n, source) = result?; (n, source, true)
+            }
+            result = workers.join_next() => { anyhow::bail!("import worker unexpectedly exited: {result:?}"); }
+        };
+        let packet = if is_broadcast {
+            &broadcast_bytes[..n]
+        } else {
+            &bytes[..n]
+        };
+        if since.elapsed() >= Duration::from_secs(1) {
+            count = 0;
+            since = Instant::now();
+        }
+        count += 1;
+        if count > 64 || !client_policy.allows(source.ip()) || !decode_probe(packet) {
+            continue;
+        }
+        for (port, ready) in &advertisements {
+            if ready.load(Ordering::Acquire) {
+                discovery
+                    .send_to(&encode_advert(*port).expect("validated port"), source)
+                    .await?;
             }
         }
     }
@@ -577,13 +640,29 @@ async fn import_session(
         certificate_key_binding(&peer.peer_certificate()?) == tls.expected_peer_binding,
         "exporter certificate binding denied"
     );
-    let connection = peer.connection();
+    import_connection(
+        RoomConnection::Quic(peer.connection().clone()),
+        &room.room_id,
+        allowed,
+        socket,
+        ready,
+    )
+    .await
+}
+
+pub(crate) async fn import_connection(
+    connection: RoomConnection,
+    room_id: &str,
+    allowed: &ClientPolicy,
+    socket: Arc<UdpSocket>,
+    ready: Arc<AtomicBool>,
+) -> Result<()> {
     let (mut tx, mut rx) = connection.open_bi().await?;
     write_json(
-        &mut tx,
+        &mut *tx,
         &Request {
             version: 1,
-            room_id: room.room_id.clone(),
+            room_id: room_id.to_owned(),
         },
     )
     .await?;
@@ -594,7 +673,7 @@ async fn import_session(
     let mut bytes = vec![0; holodeck_discovery::MAX_ROOM_PACKET_BYTES + 1];
     let mut lease_deadline = Instant::now() + Duration::from_secs(6);
     let mut generation = String::new();
-    let mut control = Box::pin(read_json::<Lease>(&mut rx));
+    let mut control = Box::pin(read_json::<Lease>(&mut *rx));
     let mut timer = tokio::time::interval(Duration::from_millis(100));
     let mut count = 0;
     let mut since = Instant::now();
@@ -602,13 +681,13 @@ async fn import_session(
         tokio::select! {
             lease = &mut control => {
                 let lease = lease?;
-                ensure!(lease.version == 1 && lease.room_id == room.room_id && lease.ttl_ms > 0 && lease.ttl_ms <= 6000 && !lease.generation.is_empty(), "invalid room lease");
+                ensure!(lease.version == 1 && lease.room_id == room_id && lease.ttl_ms > 0 && lease.ttl_ms <= 6000 && !lease.generation.is_empty(), "invalid room lease");
                 if generation != lease.generation { clients.clear(); reassembler = Reassembler::default(); generation = lease.generation; }
                 lease_deadline = Instant::now() + Duration::from_millis(lease.ttl_ms.into());
                 ready.store(lease.ready, Ordering::Release);
                 if !lease.ready { clients.clear(); }
                 drop(control);
-                control = Box::pin(read_json::<Lease>(&mut rx));
+                control = Box::pin(read_json::<Lease>(&mut *rx));
             }
             _ = timer.tick() => {
                 if Instant::now() >= lease_deadline {
@@ -629,7 +708,7 @@ async fn import_session(
                 }
                 let (id, seen) = clients.get_mut(&address).expect("client exists"); *seen = Instant::now();
                 sequence = sequence.wrapping_add(1);
-                send_datagram(connection, *id, sequence, &bytes[..n])?;
+                send_datagram(&connection, *id, sequence, &bytes[..n])?;
             }
             incoming = connection.read_datagram() => {
                 let packet = incoming?;

@@ -14,12 +14,19 @@ serde_json = "1"
 ipnet = { version = "2", features = ["serde"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "sync", "net", "time"] }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+bytes = "1"
+iroh = { version = "1.3", optional = true }
+libc = { version = "0.2", optional = true }
+rustls-pemfile = { version = "2", optional = true }
 unibus-quic = { path = "../unibus-quic" }
 unibus = { path = "../unibus" }
 unibus-mycelium = { path = "../unibus-mycelium" }
 url = "2"
 holodeck-discovery = { git = "https://github.com/ajmwagar/holodeck.git", rev = "fbea06f9b62f6a3c8131d4e3c745cd39fcc5712a" }
 rusty_enet = "0.4.0"
+
+[features]
+iroh = ["dep:iroh", "dep:libc", "dep:rustls-pemfile"]
 
 [dev-dependencies]
 rcgen = "0.14"

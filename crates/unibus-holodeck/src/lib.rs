@@ -4,8 +4,78 @@ use anyhow::{Result, ensure};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "iroh")]
+pub mod iroh_runtime;
 pub mod room_directory;
 pub mod runtime;
+
+#[derive(Clone)]
+pub enum RoomConnection {
+    Quic(quinn::Connection),
+    #[cfg(feature = "iroh")]
+    Iroh(iroh::endpoint::Connection),
+}
+
+impl RoomConnection {
+    fn max_datagram_size(&self) -> Option<usize> {
+        match self {
+            Self::Quic(c) => c.max_datagram_size(),
+            #[cfg(feature = "iroh")]
+            Self::Iroh(c) => c.max_datagram_size(),
+        }
+    }
+    fn send_datagram(&self, bytes: Vec<u8>) -> Result<()> {
+        match self {
+            Self::Quic(c) => c.send_datagram(bytes.into())?,
+            #[cfg(feature = "iroh")]
+            Self::Iroh(c) => c.send_datagram(bytes.into())?,
+        }
+        Ok(())
+    }
+    pub async fn read_datagram(&self) -> Result<bytes::Bytes> {
+        Ok(match self {
+            Self::Quic(c) => c.read_datagram().await?,
+            #[cfg(feature = "iroh")]
+            Self::Iroh(c) => c.read_datagram().await?,
+        })
+    }
+    pub async fn open_bi(
+        &self,
+    ) -> Result<(
+        Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+        Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+    )> {
+        match self {
+            Self::Quic(c) => {
+                let (tx, rx) = c.open_bi().await?;
+                Ok((Box::new(tx), Box::new(rx)))
+            }
+            #[cfg(feature = "iroh")]
+            Self::Iroh(c) => {
+                let (tx, rx) = c.open_bi().await?;
+                Ok((Box::new(tx), Box::new(rx)))
+            }
+        }
+    }
+    pub async fn accept_bi(
+        &self,
+    ) -> Result<(
+        Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+        Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+    )> {
+        match self {
+            Self::Quic(c) => {
+                let (tx, rx) = c.accept_bi().await?;
+                Ok((Box::new(tx), Box::new(rx)))
+            }
+            #[cfg(feature = "iroh")]
+            Self::Iroh(c) => {
+                let (tx, rx) = c.accept_bi().await?;
+                Ok((Box::new(tx), Box::new(rx)))
+            }
+        }
+    }
+}
 
 pub const MAX_CLIENTS: usize = 32;
 const CHUNK: usize = 900;
@@ -117,7 +187,7 @@ impl Reassembler {
 }
 
 pub fn send_datagram(
-    connection: &quinn::Connection,
+    connection: &RoomConnection,
     client: u64,
     sequence: u32,
     bytes: &[u8],
@@ -129,7 +199,7 @@ pub fn send_datagram(
                 .is_some_and(|max| part.len() <= max),
             "QUIC datagram MTU unavailable or too small"
         );
-        connection.send_datagram(part.into())?;
+        connection.send_datagram(part)?;
     }
     Ok(())
 }
