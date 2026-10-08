@@ -123,6 +123,7 @@ impl MyceliumDirectory {
             peer_id: peer_id.to_owned(),
             site: node.sites.into_iter().next(),
             endpoints,
+            iroh_endpoints: vec![],
             expires_at_unix_s: now_unix_s.saturating_add(self.candidate_ttl.as_secs()),
         };
         candidate.validate(now_unix_s)?;

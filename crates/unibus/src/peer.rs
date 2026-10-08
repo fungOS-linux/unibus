@@ -21,6 +21,9 @@ pub struct PeerCandidate {
     #[serde(default)]
     pub site: Option<String>,
     pub endpoints: Vec<NetworkEndpoint>,
+    /// Optional key-addressed transports; old IP-only candidates remain valid.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub iroh_endpoints: Vec<IrohPeerEndpoint>,
     /// Provider freshness bound. A directory must not return this candidate
     /// after the timestamp without refreshing its source.
     pub expires_at_unix_s: u64,
@@ -31,7 +34,9 @@ impl PeerCandidate {
         if self.peer_id.trim().is_empty() || self.peer_id.len() > 128 {
             return Err(PeerError("invalid peer id".into()));
         }
-        if self.endpoints.is_empty() || self.endpoints.len() > 32 {
+        if self.endpoints.len() + self.iroh_endpoints.len() == 0
+            || self.endpoints.len() + self.iroh_endpoints.len() > 32
+        {
             return Err(PeerError("peer requires 1..=32 endpoints".into()));
         }
         if self.expires_at_unix_s <= now_unix_s {
@@ -42,8 +47,62 @@ impl PeerCandidate {
                 .validate()
                 .map_err(|error| PeerError(error.to_string()))?;
         }
+        for endpoint in &self.iroh_endpoints {
+            endpoint.validate()?;
+        }
         Ok(())
     }
+}
+
+/// SDK-neutral public connection hints. These never constitute a grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IrohPeerEndpoint {
+    pub endpoint_id: String,
+    #[serde(default)]
+    pub direct_addresses: Vec<std::net::SocketAddr>,
+    #[serde(default)]
+    pub relay_urls: Vec<String>,
+}
+
+impl IrohPeerEndpoint {
+    pub fn validate(&self) -> Result<(), PeerError> {
+        if self.endpoint_id.len() != 64
+            || !self
+                .endpoint_id
+                .bytes()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+            || self.endpoint_id.bytes().all(|c| c == b'0')
+            || self.direct_addresses.len() > 16
+            || self.relay_urls.len() > 4
+            || self.direct_addresses.is_empty() && self.relay_urls.is_empty()
+            || self
+                .direct_addresses
+                .iter()
+                .any(|a| a.port() == 0 || a.ip().is_unspecified() || a.ip().is_multicast())
+            || self.relay_urls.iter().any(|url| {
+                url.len() > 2048
+                    || !url.starts_with("https://")
+                    || url.chars().any(char::is_control)
+            })
+        {
+            return Err(PeerError("invalid Iroh endpoint hints".into()));
+        }
+        Ok(())
+    }
+}
+
+/// Optional additional local policy. It may restrict, never replace, the
+/// transport's signed-session and peer-key checks. Implementations must fail
+/// closed and avoid blocking the executor (e.g. offload local authority IPC).
+pub trait PeerAccessPolicy: Send + Sync {
+    fn authorize<'a>(
+        &'a self,
+        source: &'a str,
+        destination: &'a str,
+        kind: &'a str,
+        now_unix_s: u64,
+    ) -> PeerFuture<'a, ()>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,6 +214,7 @@ mod tests {
         let candidate = PeerCandidate {
             peer_id: "home-pi".into(),
             site: Some("wagar-house".into()),
+            iroh_endpoints: vec![],
             endpoints: vec![NetworkEndpoint {
                 transport: Transport::Quic,
                 host: "home-pi.mesh.fpl.dev".into(),
@@ -211,6 +271,7 @@ mod tests {
         let candidate = PeerCandidate {
             peer_id: "home-pi".into(),
             site: None,
+            iroh_endpoints: vec![],
             endpoints: vec![NetworkEndpoint {
                 transport: Transport::Quic,
                 host: "home-pi.mesh.fpl.dev".into(),

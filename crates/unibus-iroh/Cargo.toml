@@ -5,12 +5,18 @@ edition.workspace = true
 license.workspace = true
 description = "Credential-free Iroh relay catalogs over the Unibus discovery boundary"
 
+[features]
+default = []
+transport = ["dep:iroh", "dep:tokio"]
+
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 unibus.workspace = true
 url = "2"
+iroh = { version = "=1.3.0", default-features = false, features = ["tls-ring"], optional = true }
+tokio = { workspace = true, features = ["time", "net"], optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

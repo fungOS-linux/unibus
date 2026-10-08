@@ -12,7 +12,7 @@ use unibus::{
 
 use crate::{QuicEndpoint, QuicPeer, certificate_key_binding};
 
-pub const DIRECT_AUTH_KIND: &str = "unibus.direct.authenticate.v1";
+pub use unibus::direct::DIRECT_AUTH_KIND;
 
 pub struct DirectQuicTransport {
     bind_address: SocketAddr,
@@ -245,18 +245,8 @@ impl DirectQuicSession {
         payload: &[u8],
         expected_producer: &str,
     ) -> Result<(), PeerError> {
-        if envelope.installation_id != self.claims.installation_id
-            || envelope.producer_id != expected_producer
-            || !self.claims.kinds.contains(&envelope.message.kind)
-            || payload.len() > self.claims.max_payload_bytes as usize
-            || !envelope.token.is_empty()
-        {
-            return Err(PeerError(
-                "frame exceeds direct-session identity or scope".into(),
-            ));
-        }
-        envelope
-            .validate(&self.claims.installation_id, now_unix_ms())
+        self.claims
+            .authorize_frame(envelope, payload.len(), expected_producer, now_unix_ms())
             .map_err(|error| PeerError(error.to_string()))
     }
 }
@@ -434,6 +424,7 @@ mod tests {
         let candidate = PeerCandidate {
             peer_id: "server".into(),
             site: Some("test-site".into()),
+            iroh_endpoints: vec![],
             endpoints: vec![NetworkEndpoint {
                 transport: Transport::Quic,
                 host: server_address.ip().to_string(),

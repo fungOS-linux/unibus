@@ -16,6 +16,7 @@ pub const DIRECT_SESSION_SCHEMA_V1: u32 = 1;
 pub const MAX_DIRECT_SESSION_TTL_SECS: u64 = 300;
 pub const MAX_DIRECT_KINDS: usize = 32;
 pub const MAX_DIRECT_CANDIDATES: usize = 16;
+pub const DIRECT_AUTH_KIND: &str = "unibus.direct.authenticate.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -135,6 +136,40 @@ impl DirectSessionClaims {
             None
         }
     }
+
+    /// Signature and peer-key verification must precede these per-frame
+    /// checks. Established sessions expire strictly, without handshake skew.
+    pub fn authorize_frame(
+        &self,
+        envelope: &crate::Envelope,
+        payload_len: usize,
+        expected_producer: &str,
+        now_unix_ms: u64,
+    ) -> Result<(), DirectSessionError> {
+        let remote = self
+            .peer_for(expected_producer)
+            .ok_or_else(|| DirectSessionError("producer is not a session participant".into()))?;
+        if now_unix_ms / 1000 >= self.exp
+            || now_unix_ms / 1000 < self.iat.saturating_sub(5)
+            || envelope.installation_id != self.installation_id
+            || envelope.producer_id != expected_producer
+            || envelope
+                .destination
+                .as_deref()
+                .is_some_and(|id| id != remote.producer_id)
+            || !self.kinds.contains(&envelope.message.kind)
+            || payload_len > self.max_payload_bytes as usize
+            || payload_len != envelope.payload_bytes
+            || !envelope.token.is_empty()
+        {
+            return Err(DirectSessionError(
+                "frame exceeds direct-session lifetime, identity or scope".into(),
+            ));
+        }
+        envelope
+            .validate(&self.installation_id, now_unix_ms)
+            .map_err(|error| DirectSessionError(error.to_string()))
+    }
 }
 
 fn validate_peer(peer: &PeerBinding) -> Result<(), DirectSessionError> {
@@ -201,6 +236,45 @@ mod tests {
         assert_eq!(
             claims.peer_for("neo-midi").unwrap().producer_id,
             "home-pi-midi"
+        );
+    }
+
+    #[test]
+    fn frame_guard_rechecks_expiry_recipient_source_and_payload() {
+        let claims = claims();
+        let mut frame = crate::Envelope::new(
+            "wagar-house",
+            "neo-midi",
+            Some("home-pi-midi"),
+            "",
+            crate::Message::new("midi.packet.v1", serde_json::json!({})),
+        );
+        frame.issued_at_unix_ms = 1_060_000;
+        assert!(
+            claims
+                .authorize_frame(&frame, 0, "neo-midi", 1_060_000)
+                .is_ok()
+        );
+        assert!(
+            claims
+                .authorize_frame(&frame, 0, "neo-midi", 1_120_000)
+                .is_err()
+        );
+        assert!(
+            claims
+                .authorize_frame(&frame, 1, "neo-midi", 1_060_000)
+                .is_err()
+        );
+        assert!(
+            claims
+                .authorize_frame(&frame, 0, "intruder", 1_060_000)
+                .is_err()
+        );
+        frame.destination = Some("intruder".into());
+        assert!(
+            claims
+                .authorize_frame(&frame, 0, "neo-midi", 1_060_000)
+                .is_err()
         );
     }
 
