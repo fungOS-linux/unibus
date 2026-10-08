@@ -128,7 +128,8 @@ probes on UDP 6788 with port 6790. Iroh selected direct tailnet paths in these
 checks. Agora One's direct UDP route to Titan was then temporarily blocked;
 the importer selected `Relay(https://100.80.85.86:14041/)` and the observer
 join passed. Removing the block restored the direct path and another observer
-join passed. An unlisted endpoint's rejection has not yet been exercised live.
+join passed. A fresh, unlisted Iroh endpoint was explicitly rejected by the
+relay as `not authorized`.
 
 To roll back one host, stop and disable its `holodeck-iroh@import.service`,
 then enable and start its retained `unibus-holodeck@import.service`. The two
