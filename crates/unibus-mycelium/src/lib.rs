@@ -11,7 +11,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Deserialize;
-use unibus::{NetworkEndpoint, PeerCandidate, PeerDirectory, PeerError, Transport};
+use unibus::{
+    NetworkEndpoint, NetworkEndpointError, PeerCandidate, PeerDirectory, PeerError,
+    ServiceDirectory, ServiceObservation, Transport,
+};
 use unibus_quic::{PeerCredentialMaterial, PeerCredentials, PemPeerCredentials};
 
 /// Loads the enrolled Mycelium peer identity through Unibus's provider-neutral
@@ -134,6 +137,54 @@ impl PeerDirectory for MyceliumDirectory {
     }
 }
 
+/// Imports Mycelium's existing provider-neutral service scan through its
+/// public RPC boundary. This adapter performs no discovery of its own.
+#[derive(Debug, Clone)]
+pub struct MyceliumServiceDirectory {
+    socket_path: PathBuf,
+}
+
+impl MyceliumServiceDirectory {
+    pub fn new(socket_path: PathBuf) -> Result<Self, NetworkEndpointError> {
+        if socket_path.as_os_str().is_empty() {
+            return Err(NetworkEndpointError(
+                "invalid Mycelium service directory configuration".into(),
+            ));
+        }
+        Ok(Self { socket_path })
+    }
+}
+
+impl ServiceDirectory for MyceliumServiceDirectory {
+    fn services(&self, kind: &str) -> Result<Vec<ServiceObservation>, NetworkEndpointError> {
+        if kind.trim().is_empty() {
+            return Err(NetworkEndpointError("service kind is empty".into()));
+        }
+        let catalog = request_services(&self.socket_path)?;
+        let mut observations = catalog
+            .observations
+            .into_iter()
+            .filter(|observation| observation.value.kind == kind)
+            .map(|observation| {
+                let service = ServiceObservation {
+                    service_id: observation.service_id,
+                    kind: observation.value.kind,
+                    endpoints: observation.value.endpoints,
+                    observed_at_unix_s: observation.observed_at,
+                    expires_at_unix_s: observation.expires_at,
+                    provenance_provider: observation.provenance.provider,
+                    provenance_observer: observation.provenance.observer,
+                    attributes: observation.value.attributes,
+                };
+                service.validate()?;
+                Ok(service)
+            })
+            .collect::<Result<Vec<_>, NetworkEndpointError>>()?;
+        observations.sort_by(|left, right| left.service_id.cmp(&right.service_id));
+        Ok(observations)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct RpcResponse {
     ok: bool,
@@ -141,6 +192,45 @@ struct RpcResponse {
     result: Option<Topology>,
     #[serde(default)]
     error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceRpcResponse {
+    ok: bool,
+    #[serde(default)]
+    result: Option<ServiceCatalog>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceCatalog {
+    #[serde(default)]
+    observations: Vec<MyceliumServiceObservation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MyceliumServiceObservation {
+    service_id: String,
+    observed_at: u64,
+    expires_at: u64,
+    provenance: ServiceProvenance,
+    value: ObservedService,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceProvenance {
+    provider: String,
+    observer: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ObservedService {
+    kind: String,
+    #[serde(default)]
+    endpoints: Vec<String>,
+    #[serde(default)]
+    attributes: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -206,9 +296,57 @@ fn request_topology(socket_path: &std::path::Path) -> Result<Topology, PeerError
         .ok_or_else(|| PeerError("Mycelium topology response has no result".into()))
 }
 
+#[cfg(unix)]
+fn request_services(socket_path: &std::path::Path) -> Result<ServiceCatalog, NetworkEndpointError> {
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket_path).map_err(|error| {
+        NetworkEndpointError(format!(
+            "connect Mycelium socket {}: {error}",
+            socket_path.display()
+        ))
+    })?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| NetworkEndpointError(format!("set Mycelium read timeout: {error}")))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| NetworkEndpointError(format!("set Mycelium write timeout: {error}")))?;
+    stream
+        .write_all(b"{\"method\":\"services\"}\n")
+        .map_err(|error| NetworkEndpointError(format!("request Mycelium services: {error}")))?;
+    stream
+        .flush()
+        .map_err(|error| NetworkEndpointError(format!("flush Mycelium request: {error}")))?;
+    let mut line = String::new();
+    BufReader::new(stream)
+        .read_line(&mut line)
+        .map_err(|error| NetworkEndpointError(format!("read Mycelium services: {error}")))?;
+    let response: ServiceRpcResponse = serde_json::from_str(&line)
+        .map_err(|error| NetworkEndpointError(format!("decode Mycelium services: {error}")))?;
+    if !response.ok {
+        return Err(NetworkEndpointError(format!(
+            "Mycelium services failed: {}",
+            response.error.unwrap_or_else(|| "unknown error".into())
+        )));
+    }
+    response
+        .result
+        .ok_or_else(|| NetworkEndpointError("Mycelium services response has no result".into()))
+}
+
 #[cfg(not(unix))]
 fn request_topology(_socket_path: &std::path::Path) -> Result<Topology, PeerError> {
     Err(PeerError(
+        "Mycelium Unix-socket adapter is unavailable on this platform".into(),
+    ))
+}
+
+#[cfg(not(unix))]
+fn request_services(
+    _socket_path: &std::path::Path,
+) -> Result<ServiceCatalog, NetworkEndpointError> {
+    Err(NetworkEndpointError(
         "Mycelium Unix-socket adapter is unavailable on this platform".into(),
     ))
 }
@@ -355,6 +493,50 @@ mod tests {
         .unwrap();
         let candidate = directory.resolve("agora-one", 100).unwrap();
         assert_eq!(candidate.endpoints[0].host, "192.168.10.82");
+        server.join().unwrap();
+        std::fs::remove_file(socket).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn imports_existing_mycelium_service_catalog_without_rescanning() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let socket = std::env::temp_dir().join(format!("ums-{}-{nonce}.sock", std::process::id()));
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            assert_eq!(request, "{\"method\":\"services\"}\n");
+            let response = serde_json::json!({"ok":true,"result":{
+                "schema_version":1,
+                "observations":[{
+                    "schema_version":1,
+                    "service_id":"service/studio/mcp/tcp/8000",
+                    "observed_at":100,
+                    "expires_at":200,
+                    "provenance":{"provider":"mycelium-topology","observer":"studio","source_id":"tcp:8000/mcp"},
+                    "confidence":"strong",
+                    "value":{"kind":"mcp","endpoints":["tcp://192.168.1.2:8000"],"protocols":["tcp"],"formats":[],"attributes":{"node_id":"studio"}}
+                }]
+            }});
+            writeln!(stream, "{response}").unwrap();
+        });
+
+        let directory = MyceliumServiceDirectory::new(socket.clone()).unwrap();
+        let services = directory.services("mcp").unwrap();
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].provenance_provider, "mycelium-topology");
+        assert_eq!(services[0].attributes["node_id"], "studio");
         server.join().unwrap();
         std::fs::remove_file(socket).unwrap();
     }
