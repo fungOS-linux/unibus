@@ -2907,6 +2907,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "unibus-iroh"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "unibus",
+ "url",
+]
+
+[[package]]
 name = "unibus-lua"
 version = "0.1.0"
 dependencies = [

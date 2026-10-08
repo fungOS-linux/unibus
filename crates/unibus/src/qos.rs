@@ -60,6 +60,7 @@ impl Qos {
             | "unibus.adapter.catalog.v1"
             | "unibus.adapter.status.v1"
             | "unibus.service.catalog.v1"
+            | "unibus.iroh.gateways.v1"
             | "unibus.service.health.v1"
             | "media.video_stream.v1"
             | "spatial.presence.v1"
