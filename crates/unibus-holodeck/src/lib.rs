@@ -4,6 +4,7 @@ use anyhow::{Result, ensure};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+pub mod room_directory;
 pub mod runtime;
 
 pub const MAX_CLIENTS: usize = 32;

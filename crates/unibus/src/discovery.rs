@@ -129,7 +129,7 @@ impl ServiceObservation {
             endpoint.len() > 2048
                 || !matches!(
                     endpoint.split_once("://").map(|(scheme, _)| scheme),
-                    Some("http" | "https" | "tcp" | "quic")
+                    Some("http" | "https" | "tcp" | "quic" | "iroh")
                 )
         }) {
             return Err(NetworkEndpointError("invalid service endpoint".into()));
@@ -317,5 +317,20 @@ mod tests {
         assert_eq!(directory.services("mcp").unwrap(), [observation]);
         assert!(directory.services("dcp").unwrap().is_empty());
         assert!(directory.services("bad kind").is_err());
+    }
+
+    #[test]
+    fn iroh_service_identity_passes_generic_directory_boundary() {
+        let observation = ServiceObservation {
+            service_id: "service/agora/iroh/holodeck-room".into(),
+            kind: "iroh".into(),
+            endpoints: vec![format!("iroh://{}", "a".repeat(64))],
+            observed_at_unix_s: 100,
+            expires_at_unix_s: 200,
+            provenance_provider: "mycelium-iroh-owner-lease".into(),
+            provenance_observer: "agora".into(),
+            attributes: BTreeMap::new(),
+        };
+        assert!(StaticServiceDirectory::new(vec![observation]).is_ok());
     }
 }
