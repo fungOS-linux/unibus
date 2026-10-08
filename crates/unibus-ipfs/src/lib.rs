@@ -103,8 +103,7 @@ impl Kubo {
         })
     }
 
-    pub fn fetch(&self, request: &Fetch) -> Result<Vec<u8>> {
-        let cid = request.validate()?;
+    fn file_size(&self, cid: &cid::Cid) -> Result<u64> {
         let stat_response = self
             .client
             .post(format!("{}/api/v0/files/stat", self.endpoint))
@@ -123,8 +122,49 @@ impl Kubo {
             stat.kind == "file" && stat.size < MAX_CONTENT,
             "CID is not a bounded file"
         );
-        ensure!(request.offset <= stat.size, "range starts beyond EOF");
-        let expected = request.length.min(stat.size - request.offset);
+        Ok(stat.size)
+    }
+
+    /// Retain one bounded file DAG. The authenticated caller owns publication policy.
+    /// This library method is deliberately not exposed by the fetch-only bus service.
+    pub fn pin_file(&self, value: &str) -> Result<()> {
+        ensure!(value.len() <= 128, "CID too long");
+        let cid = value.parse::<cid::Cid>()?;
+        self.file_size(&cid)?;
+        let response = self
+            .client
+            .post(format!("{}/api/v0/pin/add", self.endpoint))
+            .query(&[("arg", cid.to_string()), ("recursive", "true".into())])
+            .send()?
+            .error_for_status()?;
+        ensure!(
+            response.status().is_success(),
+            "Kubo pin returned non-success"
+        );
+        let mut bytes = Vec::new();
+        response.take(4097).read_to_end(&mut bytes)?;
+        ensure!(bytes.len() <= 4096, "Kubo pin response too large");
+        #[derive(Deserialize)]
+        struct Pins {
+            #[serde(rename = "Pins")]
+            pins: Vec<String>,
+        }
+        let receipt: Pins = serde_json::from_slice(&bytes)?;
+        ensure!(
+            receipt
+                .pins
+                .iter()
+                .any(|p| p.parse::<cid::Cid>().ok().as_ref() == Some(&cid)),
+            "Kubo did not confirm requested pin"
+        );
+        Ok(())
+    }
+
+    pub fn fetch(&self, request: &Fetch) -> Result<Vec<u8>> {
+        let cid = request.validate()?;
+        let size = self.file_size(&cid)?;
+        ensure!(request.offset <= size, "range starts beyond EOF");
+        let expected = request.length.min(size - request.offset);
         if expected == 0 {
             return Ok(Vec::new());
         }
@@ -260,6 +300,25 @@ mod tests {
             String::from_utf8(header).unwrap()
         });
         (endpoint, thread)
+    }
+
+    #[test]
+    fn pin_requires_bounded_file_and_matching_receipt() {
+        let receipt = format!("{{\"Pins\":[\"{CID}\"]}}");
+        let (endpoint, thread) = server("200 OK", receipt.as_bytes());
+        Kubo::new(&endpoint).unwrap().pin_file(CID).unwrap();
+        let header = thread.join().unwrap();
+        assert!(header.starts_with("POST /api/v0/pin/add?arg="));
+        assert!(header.contains("recursive=true"));
+        for (status, body) in [
+            ("200 OK", b"{\"Pins\":[]}".as_slice()),
+            ("500 Error", b"failed".as_slice()),
+            ("302 Found", b"".as_slice()),
+        ] {
+            let (endpoint, thread) = server(status, body);
+            assert!(Kubo::new(&endpoint).unwrap().pin_file(CID).is_err());
+            thread.join().unwrap();
+        }
     }
 
     #[test]
