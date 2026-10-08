@@ -31,6 +31,8 @@ pub struct IrohRoom {
 pub enum Config {
     Export {
         key_file: PathBuf,
+        bind_port: u16,
+        advertise_addresses: Vec<SocketAddr>,
         relay_url: Option<String>,
         relay_ca: Option<PathBuf>,
         mycelium_home: PathBuf,
@@ -113,9 +115,19 @@ async fn endpoint(
     relay_url: Option<&str>,
     relay_ca: Option<&Path>,
     accepting: bool,
+    bind_port: Option<u16>,
+    advertise_addresses: &[SocketAddr],
 ) -> Result<Endpoint> {
     validate_relay(relay_url, relay_ca)?;
     let mut builder = Endpoint::builder(presets::Minimal).secret_key(read_key(key_file)?);
+    if let Some(port) = bind_port {
+        builder = builder
+            .clear_ip_transports()
+            .bind_addr(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))?;
+    }
+    for address in advertise_addresses {
+        builder = builder.external_addr(*address);
+    }
     builder = match relay_url {
         Some(relay) => builder.relay_mode(iroh::RelayMode::custom([relay.parse()?])),
         None => builder.relay_mode(iroh::RelayMode::Disabled),
@@ -170,6 +182,13 @@ impl Client {
             connection.remote_id().to_string() == self.remote,
             "remote Iroh identity mismatch"
         );
+        for path in connection.paths().iter().filter(|path| path.is_selected()) {
+            eprintln!(
+                "Iroh room {room_id} connected to {} via {:?}",
+                self.remote,
+                path.remote_addr()
+            );
+        }
         let mut watch = tokio::time::interval(Duration::from_secs(30));
         watch.tick().await;
         let session = runtime::import_connection(
@@ -323,6 +342,8 @@ pub fn validate(config: &Config) -> Result<()> {
     match config {
         Config::Export {
             key_file,
+            bind_port,
+            advertise_addresses,
             relay_url,
             relay_ca,
             mycelium_home,
@@ -331,6 +352,17 @@ pub fn validate(config: &Config) -> Result<()> {
             rooms,
         } => {
             validate_relay(relay_url.as_deref(), relay_ca.as_deref())?;
+            ensure!(*bind_port > 0, "Iroh export bind port required");
+            ensure!(
+                !advertise_addresses.is_empty()
+                    && advertise_addresses.len() <= 8
+                    && advertise_addresses.iter().all(|address| {
+                        address.port() == *bind_port
+                            && !address.ip().is_unspecified()
+                            && !address.ip().is_multicast()
+                    }),
+                "Iroh export requires bounded addresses on its bind port"
+            );
             ensure!(
                 key_file.is_absolute()
                     && mycelium_home.is_absolute()
@@ -425,6 +457,8 @@ pub async fn run(config: Config) -> Result<()> {
     match config {
         Config::Export {
             key_file,
+            bind_port,
+            advertise_addresses,
             relay_url,
             relay_ca,
             mycelium_home,
@@ -432,8 +466,15 @@ pub async fn run(config: Config) -> Result<()> {
             allowed_importers,
             rooms,
         } => {
-            let endpoint =
-                endpoint(&key_file, relay_url.as_deref(), relay_ca.as_deref(), true).await?;
+            let endpoint = endpoint(
+                &key_file,
+                relay_url.as_deref(),
+                relay_ca.as_deref(),
+                true,
+                Some(bind_port),
+                &advertise_addresses,
+            )
+            .await?;
             let allowed = allowed_importers
                 .iter()
                 .map(|id| key_id(id))
@@ -499,8 +540,15 @@ pub async fn run(config: Config) -> Result<()> {
             allowed_subnets,
             rooms,
         } => {
-            let endpoint =
-                endpoint(&key_file, relay_url.as_deref(), relay_ca.as_deref(), false).await?;
+            let endpoint = endpoint(
+                &key_file,
+                relay_url.as_deref(),
+                relay_ca.as_deref(),
+                false,
+                None,
+                &[],
+            )
+            .await?;
             let directory = MyceliumServiceDirectory::new(mycelium_socket)?;
             let client = Client {
                 endpoint,

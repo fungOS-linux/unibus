@@ -55,6 +55,8 @@ On the remote room server, configure `holodeck-iroh run` with an export file:
 {
   "mode": "export",
   "key_file": "/private/path/room-iroh.key",
+  "bind_port": 16789,
+  "advertise_addresses": ["192.168.1.10:16789"],
   "relay_url": "https://relay.example.net/",
   "relay_ca": "/private/path/relay-ca.pem",
   "mycelium_home": "/private/path/.mycelium",
@@ -91,10 +93,47 @@ Use the actual room host and Quest addresses and ports. The import process owns
 the selected LAN discovery port, so run it where the ordinary room responder
 does not bind that same address and port. Both peers must configure the private
 relay to get relay fallback; omit `relay_url` and `relay_ca` only for a direct
-path test. Run `holodeck-iroh check CONFIG.json` before `run`. Confirm the
+path test. The exporter's advertised addresses must point to its bound UDP port
+and be reachable by the importer; include each relevant LAN or overlay address.
+Run `holodeck-iroh check CONFIG.json` before `run`. Confirm the
 exported lease appears in `mycelium services --json` and in
 `holodeck-room-hosts MYCELIUM_SOCKET REMOTE_ENDPOINT_ID` on the home host.
-Direct and relayed Iroh paths still need verification on the two real networks.
+Verify each selected Iroh path on the two real networks before claiming
+direct or relay availability.
+
+## Titan and Agora One deployment (2026-10-08)
+
+The name directory is the pair of room export/import policies on the hosts.
+The display label comes from the exporter; the importer pins the corresponding
+endpoint ID and room ID. Mycelium supplies current route hints, not trust.
+This table records the verified keys; read the host configs after any key
+rotation rather than treating this table as live configuration.
+
+| Name | Room ID | Exporter endpoint ID | Importing host |
+| --- | --- | --- | --- |
+| Titan | `titan/holodeck` | `88b7e8f71e19867544340b9a0877d237b01f84e93489f28fc6b4a62f38d5acd7` | Agora One |
+| Agora One | `agora-one/holodeck` | `8ed9e88d17b5975d8e563c1591bacc1c8acd3a4c7744fc706f4028b3707651ae` | Titan |
+
+Agora One runs these services as `ajmwagar`; Titan runs them as `avery`, whose
+Mycelium daemon owns the service catalog. Both exporters bind UDP 16789 and
+advertise their LAN and tailnet addresses. Both importers answer UDP 6788 on
+their LAN address and forward ENet at UDP 6790. The previous reciprocal
+`unibus-holodeck@import.service` instances are disabled, with their configs
+retained. The private relay is `https://100.80.85.86:14041/`, trusted through
+each host's Mycelium mesh CA, and allows only the two room endpoint keys.
+
+Both directions passed `room-smoke` against UDP 6790 with observer welcome,
+creation state, and space snapshots. The imports also answered discovery
+probes on UDP 6788 with port 6790. Iroh selected direct tailnet paths in these
+checks. Agora One's direct UDP route to Titan was then temporarily blocked;
+the importer selected `Relay(https://100.80.85.86:14041/)` and the observer
+join passed. Removing the block restored the direct path and another observer
+join passed. An unlisted endpoint's rejection has not yet been exercised live.
+
+To roll back one host, stop and disable its `holodeck-iroh@import.service`,
+then enable and start its retained `unibus-holodeck@import.service`. The two
+services cannot share UDP 6788 and 6790 simultaneously. Leave the exporter
+running until other hosts no longer depend on its pinned key.
 
 ## Route acceptance checks
 
