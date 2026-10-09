@@ -1,0 +1,117 @@
+# Resource gateways: first implementation slice
+
+One local Unibus router can serve as an explicit gateway for registered local
+applications. It reuses the existing daemon and authenticated adapter sessions;
+it does not create another service, scan LANs, or require Iroh. Mycelium catalog
+publication, dynamic registration and live Canvas/device pilots remain follow-up
+work under `unibus-resource-gateways`.
+
+## Ownership
+
+Mycelium owns observations, provenance and gossip. A protocol adapter explicitly
+claims that it can serve a resource; Unibus owns routing and access enforcement.
+A camera without Unibus uses a nearby adapter. The adapter speaks the native LAN
+protocol; the remote client speaks authenticated Unibus to the gateway. A secure
+gateway does not secure an unauthenticated/plaintext camera against LAN clients.
+
+`ResourceId` is a structured scope plus key. Use `site` scope for legacy devices
+without verified global identity, and `peer` scope for machine-owned local apps.
+Never identify a device by bare private IP across sites. `GatewayLease` separates
+the resource, canonical gateway machine, source service and existing transport
+candidate. Multiple gateways may advertise the same resource independently.
+Operations describe adapter capabilities, not caller permissions. Native URLs
+and backend credentials are not part of the gateway lease.
+
+## Local app routing
+
+The existing router loads an optional `UNIBUS_GATEWAY_CONFIG` JSON file and adds
+`GatewayRouter` before ordinary stream routing. No file means this slice adds no
+gateway routes. The file contains:
+
+- `gateway_peer_id`: canonical owner of these gateway leases.
+- `policy_expires_at_unix_s`: absolute freshness bound, at most 300 seconds from
+  startup. There is no indefinite offline allow or automatic renewal.
+- `routes`: explicit lease plus authenticated `backend_producer` per resource.
+- `grants`: exact caller producer, authenticated subject, resource, operations
+  and expiry. Empty grants deny every invocation; no wildcard export exists.
+
+The gateway caller must already pass normal router authentication and publication
+checks. An ACL subject is matched to that authenticated producer's existing node
+grant, never a subject supplied in a request. Backend publication must separately
+allow `unibus.gateway.result.v1`; callers publish `unibus.gateway.invoke.v1`.
+Shared-token nodes with no authenticated subject are not admitted by this slice.
+
+Invocation message body (control only, no binary payload):
+
+```json
+{
+  "schema_version": 1,
+  "request_id": "req-001",
+  "resource": {"scope": {"kind": "peer", "id": "studio-peer"}, "key": "canvas-tv"},
+  "generation": 1,
+  "operation": "canvas.control",
+  "input": {"action": "list"}
+}
+```
+
+The router selects only the configured adapter. The forwarded body is a
+`GatewayDispatch` containing `caller_producer` and `invocation`; the original
+authenticated envelope producer is retained and the bearer token removed.
+`input` belongs to the resource's protocol adapter: it is not a generic URL or
+TCP proxy. An adapter must independently validate URLs/paths and redirects if
+its own protocol supports them.
+
+The backend returns `GatewayResult` under `unibus.gateway.result.v1`, including
+`caller_producer`, `request_id`, `resource`, `generation`, and bounded `output`.
+The router requires the configured backend identity and matching pending request,
+rechecks access and lease freshness, then forwards only to the original caller.
+Other producers cannot spoof responses or select arbitrary recipients.
+
+There are at most 128 routes, 512 grants, 256 active requests and 4096 retained
+request IDs. Requests time out after five seconds or earlier envelope/lease expiry.
+Duplicate IDs, including completed or uncertain deliveries, are rejected until
+policy expiry. This is not durable exactly-once execution across daemon restart;
+side-effecting adapters must own durable idempotency. Network delivery does not
+hold the gateway state mutex. Input and output are limited to 64 KiB.
+
+## Manual runbook
+
+1. Keep the existing router installation; provision a local adapter's normal
+   authenticated producer and publication grant. Do not expose its private socket.
+2. Choose stable resource scope/key and canonical gateway owner. Record the actual
+   native authentication/encryption posture, including `unknown` where unverified.
+3. Construct a fresh explicit `GatewayLease` with generation, observed/expiry times,
+   supported operations and a validated gateway transport candidate. Its expiry
+   cannot exceed the candidate expiry or 300 seconds from observation.
+4. Create a bounded gateway config mapping that resource to the adapter producer.
+   Add only intended caller subject/resource/operation grants; keep all other access
+   denied. Policy and grant expiry are absolute, not stale config auto-renewal.
+5. Start the existing router with `UNIBUS_GATEWAY_CONFIG=/private/gateway.json` and
+   its existing normal config. Malformed/expired policies fail startup loudly.
+6. Send an invocation from an authorized registered caller. Confirm the resource
+   generation and adapter result match; verify a different subject/resource/action
+   and spoofed backend reply are denied.
+7. Let the policy expire and confirm both new calls and outstanding results fail
+   closed. To remove this static pilot, unset the variable and restart the router.
+
+No live service restart/deployment has been performed for this implementation.
+Production dynamic renewal/revocation, Mycelium publication and mTLS/Iroh gateway
+daemon wiring are not delivered by the static local-app slice.
+
+## Verification
+
+Run on the build host:
+
+```sh
+cargo check -p unibus -p unibus-router --tests
+cargo test -p unibus -p unibus-router
+```
+
+Tests cover scoped identity collisions, strict schemas, lease owner/freshness,
+exact ACL matching, generation changes, local-app dispatch/result, policy expiry
+blocking outstanding results, spoofed adapters and replay. Unit tests use recorded
+router sinks. An additional integration test starts the actual router and two
+loopback TCP clients, authenticates them through a test-only assertion verifier,
+and exercises authorized request/result plus denied operations. This plaintext
+local TCP fixture is not evidence of production Canvas, mTLS/Iroh transport or
+cross-site connectivity.
