@@ -31,6 +31,7 @@ fn main() -> Result<()> {
     anyhow::ensure!(
         (std::env::var_os("UNIBUS_GATEWAY_CATALOG").is_none()
             && std::env::var_os("UNIBUS_GATEWAY_STATE").is_none())
+            && std::env::var_os("UNIBUS_GATEWAY_AUTHORITY").is_none()
             || std::env::var_os("UNIBUS_GATEWAY_CONFIG").is_some(),
         "gateway catalog/state requires explicit gateway configuration"
     );
@@ -44,6 +45,34 @@ fn main() -> Result<()> {
         #[allow(unused_mut)]
         let mut gateway =
             unibus_router::gateway::GatewayRouter::new(gateway, unibus::envelope::now_ms() / 1000)?;
+        if let Some(path) = std::env::var_os("UNIBUS_GATEWAY_AUTHORITY") {
+            #[cfg(feature = "managed-gateway")]
+            {
+                let file = std::fs::File::open(path)?;
+                anyhow::ensure!(
+                    file.metadata()?.len() <= 1024 * 1024,
+                    "managed gateway config exceeds bound"
+                );
+                let managed: unibus_router::gateway::managed::ManagedConfig =
+                    serde_json::from_reader(file)?;
+                let owner = gateway.gateway_peer_id()?;
+                anyhow::ensure!(
+                    managed
+                        .rules
+                        .iter()
+                        .all(|rule| rule.destination_peer == owner),
+                    "managed authority destination differs from canonical gateway owner"
+                );
+                gateway = gateway.with_authority(Arc::new(
+                    unibus_router::gateway::managed::MyceliumGatewayAuthority::new(managed)?,
+                ));
+            }
+            #[cfg(not(feature = "managed-gateway"))]
+            {
+                let _ = path;
+                anyhow::bail!("UNIBUS_GATEWAY_AUTHORITY requires managed-gateway feature");
+            }
+        }
         if let Some(path) = std::env::var_os("UNIBUS_GATEWAY_STATE") {
             gateway = gateway.with_generation_store(Arc::new(
                 unibus_router::gateway::generations::GenerationFile::open(path.into())?,

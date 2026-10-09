@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Deserialize;
+pub mod access;
 use unibus::{
     NetworkEndpoint, NetworkEndpointError, PeerCandidate, PeerDirectory, PeerError,
     ServiceDirectory, ServiceObservation, Transport,

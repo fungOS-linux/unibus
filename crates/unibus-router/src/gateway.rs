@@ -20,6 +20,8 @@ const MAX_RETAINED_IDS: usize = 4096;
 #[cfg(feature = "owner-catalog")]
 pub mod catalog;
 pub mod generations;
+#[cfg(feature = "managed-gateway")]
+pub mod managed;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -98,6 +100,7 @@ impl GatewayConfig {
         }
         Ok(())
     }
+    #[cfg(test)]
     fn resolve(
         &self,
         source: &str,
@@ -105,9 +108,19 @@ impl GatewayConfig {
         invoke: &GatewayInvoke,
         now: u64,
     ) -> Result<&LocalRoute> {
+        self.resolve_authorized(source, subject, invoke, now, None)
+    }
+    fn resolve_authorized(
+        &self,
+        source: &str,
+        subject: &str,
+        invoke: &GatewayInvoke,
+        now: u64,
+        managed_expiry: Option<u64>,
+    ) -> Result<&LocalRoute> {
         invoke.validate()?;
         ensure!(
-            now < self.policy_expires_at_unix_s,
+            now < managed_expiry.unwrap_or(self.policy_expires_at_unix_s),
             "gateway policy is stale"
         );
         // Check access before exposing whether a resource exists.
@@ -116,7 +129,7 @@ impl GatewayConfig {
                 && g.auth_subject == subject
                 && g.resource == invoke.resource
                 && g.operations.contains(&invoke.operation)
-                && now < g.expires_at_unix_s),
+                && now < managed_expiry.unwrap_or(g.expires_at_unix_s)),
             "gateway access denied"
         );
         let route = self
@@ -156,6 +169,7 @@ pub struct GatewayRouter {
     publisher: Option<Arc<dyn GatewayCatalogSink>>,
     publication: Mutex<()>,
     generation_store: Option<Arc<dyn GenerationStore>>,
+    authority: Option<Arc<dyn GatewayAuthority>>,
 }
 struct RegistrationPermit {
     backend: String,
@@ -170,6 +184,16 @@ pub trait GatewayCatalogSink: Send + Sync {
 pub trait GenerationStore: Send + Sync {
     fn load(&self, owner: &str) -> Result<BTreeMap<ResourceId, u64>>;
     fn persist(&self, owner: &str, floors: &BTreeMap<ResourceId, u64>) -> Result<()>;
+}
+/// Fresh, authority-filtered expiry for an exact authenticated local binding.
+pub trait GatewayAuthority: Send + Sync {
+    fn grant_expiry(
+        &self,
+        source: &str,
+        subject: &str,
+        invocation: &GatewayInvoke,
+        now: u64,
+    ) -> Result<u64>;
 }
 impl GatewayRouter {
     pub fn gateway_peer_id(&self) -> Result<String> {
@@ -211,7 +235,12 @@ impl GatewayRouter {
             publisher: None,
             publication: Mutex::new(()),
             generation_store: None,
+            authority: None,
         })
+    }
+    pub fn with_authority(mut self, authority: Arc<dyn GatewayAuthority>) -> Self {
+        self.authority = Some(authority);
+        self
     }
     pub fn with_generation_store(mut self, store: Arc<dyn GenerationStore>) -> Result<Self> {
         let config = self
@@ -255,7 +284,7 @@ impl GatewayRouter {
             .config
             .read()
             .map_err(|_| anyhow::anyhow!("gateway policy state unavailable"))?;
-        if now >= config.policy_expires_at_unix_s {
+        if self.authority.is_none() && now >= config.policy_expires_at_unix_s {
             return Ok(vec![]);
         }
         let registered = self
@@ -268,8 +297,10 @@ impl GatewayRouter {
             .filter(|r| registered.contains(&r.lease.resource) && r.lease.validate_at(now).is_ok())
             .map(|r| {
                 let mut lease = r.lease.clone();
-                lease.expires_at_unix_s =
-                    lease.expires_at_unix_s.min(config.policy_expires_at_unix_s);
+                if self.authority.is_none() {
+                    lease.expires_at_unix_s =
+                        lease.expires_at_unix_s.min(config.policy_expires_at_unix_s);
+                }
                 lease
             })
             .collect())
@@ -303,8 +334,9 @@ impl GatewayRouter {
             .map_err(|_| anyhow::anyhow!("gateway policy state unavailable"))?;
         lease.require_owner(&config.gateway_peer_id)?;
         ensure!(
-            now < config.policy_expires_at_unix_s
-                && lease.expires_at_unix_s <= config.policy_expires_at_unix_s,
+            self.authority.is_some()
+                || (now < config.policy_expires_at_unix_s
+                    && lease.expires_at_unix_s <= config.policy_expires_at_unix_s),
             "registration cannot renew or outlive access policy"
         );
         let mut floors = self
@@ -423,7 +455,7 @@ impl HubPlugin for GatewayRouter {
             source == envelope.producer_id && payload.is_empty() && envelope.payload_bytes == 0,
             "invalid gateway frame source or payload"
         );
-        let now_ms = unibus::envelope::now_ms();
+        let mut now_ms = unibus::envelope::now_ms();
         envelope.validate(hub.installation_id(), now_ms)?;
         if matches!(
             envelope.message.kind.as_str(),
@@ -449,6 +481,70 @@ impl HubPlugin for GatewayRouter {
             }
             return Ok(true);
         }
+        ensure!(
+            serde_json::to_vec(&envelope.message.body)?.len() <= 65536,
+            "gateway control body exceeds bound"
+        );
+        // Query authority without holding route or pending-state locks.
+        let managed_expiry = if let Some(authority) = &self.authority {
+            let (caller, subject, invocation) = if envelope.message.kind == GATEWAY_INVOKE {
+                let invocation: GatewayInvoke = serde_json::from_value(serde_json::Value::Object(
+                    envelope.message.body.clone(),
+                ))?;
+                invocation.validate()?;
+                let identity = hub
+                    .grant_of(source)
+                    .context("unregistered gateway caller")?;
+                (source.to_owned(), identity.auth_subject, invocation)
+            } else {
+                let result: GatewayResult = serde_json::from_value(serde_json::Value::Object(
+                    envelope.message.body.clone(),
+                ))?;
+                let pending = self
+                    .pending
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("gateway pending state unavailable"))?;
+                let request = pending
+                    .get(&(result.caller_producer.clone(), result.request_id.clone()))
+                    .context("unknown gateway result")?;
+                ensure!(
+                    !request.completed
+                        && now_ms < request.expires_at_ms
+                        && request.backend == source
+                        && result.resource == request.invocation.resource
+                        && result.generation == request.invocation.generation,
+                    "invalid gateway result binding"
+                );
+                (
+                    result.caller_producer,
+                    request.subject.clone(),
+                    request.invocation.clone(),
+                )
+            };
+            {
+                let config = self
+                    .config
+                    .read()
+                    .map_err(|_| anyhow::anyhow!("gateway policy unavailable"))?;
+                ensure!(
+                    config.grants.iter().any(|g| g.caller_producer == caller
+                        && g.auth_subject == subject
+                        && g.resource == invocation.resource
+                        && g.operations.contains(&invocation.operation)),
+                    "gateway local binding denied"
+                );
+            }
+            let expiry = authority.grant_expiry(&caller, &subject, &invocation, now_ms / 1000)?;
+            now_ms = unibus::envelope::now_ms();
+            envelope.validate(hub.installation_id(), now_ms)?;
+            ensure!(
+                now_ms / 1000 < expiry,
+                "managed gateway grant expired during authority query"
+            );
+            Some(expiry.min(now_ms / 1000 + 300))
+        } else {
+            None
+        };
         let config = self
             .config
             .read()
@@ -464,8 +560,13 @@ impl HubPlugin for GatewayRouter {
             let identity = hub
                 .grant_of(source)
                 .context("gateway caller is not registered")?;
-            let route =
-                config.resolve(source, &identity.auth_subject, &invocation, now_ms / 1000)?;
+            let route = config.resolve_authorized(
+                source,
+                &identity.auth_subject,
+                &invocation,
+                now_ms / 1000,
+                managed_expiry,
+            )?;
             ensure!(
                 hub.connection(&route.backend_producer).is_some(),
                 "gateway adapter disconnected"
@@ -504,7 +605,11 @@ impl HubPlugin for GatewayRouter {
                     subject: identity.auth_subject,
                     backend: route.backend_producer.clone(),
                     expires_at_ms,
-                    retain_until_ms: config.policy_expires_at_unix_s.saturating_mul(1000),
+                    retain_until_ms: if managed_expiry.is_some() {
+                        now_ms.saturating_add(300_000)
+                    } else {
+                        config.policy_expires_at_unix_s.saturating_mul(1000)
+                    },
                     completed: false,
                 },
             );
@@ -542,11 +647,12 @@ impl HubPlugin for GatewayRouter {
                     && result.generation == request.invocation.generation,
                 "gateway result does not match adapter and resource"
             );
-            config.resolve(
+            config.resolve_authorized(
                 &result.caller_producer,
                 &request.subject,
                 &request.invocation,
                 now_ms / 1000,
+                managed_expiry,
             )?;
             let current = hub
                 .grant_of(&result.caller_producer)
@@ -904,5 +1010,90 @@ mod tests {
         router.config.write().unwrap().policy_expires_at_unix_s = unibus::envelope::now_ms() / 1000;
         assert!(router.handle(&hub, "canvas", &response, &[]).is_err());
         assert_eq!(caller.0.lock().unwrap().len(), 1);
+    }
+    #[test]
+    fn managed_authority_renews_access_but_revocation_blocks_outstanding_results() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        struct Authority(AtomicU64);
+        impl GatewayAuthority for Authority {
+            fn grant_expiry(&self, _: &str, _: &str, _: &GatewayInvoke, now: u64) -> Result<u64> {
+                let expiry = self.0.load(Ordering::SeqCst);
+                ensure!(now < expiry, "revoked or unavailable authority");
+                Ok(expiry)
+            }
+        }
+        let now = unibus::envelope::now_ms() / 1000;
+        let config = configuration(now);
+        let invoke = invocation(&config);
+        let caller = Arc::new(RecordingSink::default());
+        let backend = Arc::new(RecordingSink::default());
+        let grant: NodeConfig = serde_json::from_value(serde_json::json!({"producer_id":"caller","capabilities":[],"auth_subject":"oidc-subject"})).unwrap();
+        let hub = HubHandle {
+            installation_id: "test".into(),
+            grants: Arc::new(HashMap::from([("caller".into(), grant)])),
+            registry: Arc::new(Mutex::new(NodeRegistry::default())),
+            conns: Arc::new(Mutex::new(HashMap::from([
+                ("caller".into(), caller.clone() as Arc<dyn Sink>),
+                ("canvas".into(), backend.clone() as Arc<dyn Sink>),
+            ]))),
+        };
+        let authority = Arc::new(Authority(AtomicU64::new(now + 60)));
+        let router = GatewayRouter::new(config, now)
+            .unwrap()
+            .with_authority(authority.clone());
+        {
+            let mut config = router.config.write().unwrap();
+            config.policy_expires_at_unix_s = now;
+            config.grants[0].expires_at_unix_s = now;
+            config.routes[0].lease.observed_at_unix_s = now - 1;
+        }
+        let mut lease = router.config.read().unwrap().routes[0].lease.clone();
+        lease.observed_at_unix_s = now;
+        lease.expires_at_unix_s = now + 61;
+        lease.endpoint.expires_at_unix_s = now + 61;
+        router.register("canvas", lease, now).unwrap();
+        let request = Envelope::new(
+            "test",
+            "caller",
+            None,
+            "",
+            Message::new(GATEWAY_INVOKE, serde_json::to_value(&invoke).unwrap()),
+        );
+        router.handle(&hub, "caller", &request, &[]).unwrap();
+        assert_eq!(backend.0.lock().unwrap().len(), 1);
+        authority.0.store(0, Ordering::SeqCst);
+        let result = GatewayResult {
+            caller_producer: "caller".into(),
+            request_id: invoke.request_id.clone(),
+            resource: invoke.resource.clone(),
+            generation: invoke.generation,
+            output: serde_json::json!({"ok":true}),
+        };
+        let response = Envelope::new(
+            "test",
+            "canvas",
+            None,
+            "",
+            Message::new(GATEWAY_RESULT, serde_json::to_value(result).unwrap()),
+        );
+        assert!(router.handle(&hub, "canvas", &response, &[]).is_err());
+        assert!(caller.0.lock().unwrap().is_empty());
+        let mut second = request;
+        second
+            .message
+            .body
+            .insert("request_id".into(), "managed-2".into());
+        assert!(router.handle(&hub, "caller", &second, &[]).is_err());
+        authority.0.store(now + 60, Ordering::SeqCst);
+        router.handle(&hub, "caller", &second, &[]).unwrap();
+        second
+            .message
+            .body
+            .insert("request_id".into(), "managed-3".into());
+        second
+            .message
+            .body
+            .insert("operation".into(), "canvas.admin".into());
+        assert!(router.handle(&hub, "caller", &second, &[]).is_err());
     }
 }

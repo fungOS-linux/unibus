@@ -127,7 +127,8 @@ authorization: the destination Unibus router still checks every invocation/resul
 
 A release removes the local route immediately. Previously gossiped observations
 may remain until their original TTL expires; clearing the file is not a distributed
-revocation mechanism. Policy renewal/revocation is not yet dynamic. No live service
+revocation mechanism. Static policy renewal is not automatic; optional managed
+authorization is described below. No live service
 restart/deployment or production mTLS/Iroh gateway qualification has been performed.
 
 ## Durable generation floors
@@ -149,6 +150,56 @@ against an administrator restoring an older disk snapshot. A missing state file
 initializes a new store. Without the variable, legacy in-memory behavior remains.
 It does not provide durable request idempotency, policy revision tracking, or ACL
 renewal. Those remain separate from adapter lease renewal.
+
+## Optional managed authorization
+
+Build the router with `--features managed-gateway` and set
+`UNIBUS_GATEWAY_AUTHORITY` to an explicit operator-owned JSON config:
+
+```json
+{
+  "socket": "/private/myceliumd.sock",
+  "rules": [{
+    "caller_producer": "canvas-controller",
+    "auth_subject": "verified-controller-subject",
+    "resource": {"scope":{"kind":"peer","id":"display-peer"},"key":"canvas"},
+    "operation": "canvas.inspect",
+    "source_peer": "controller-peer",
+    "destination_peer": "display-peer",
+    "principal": "peer:controller-peer",
+    "scope": "canvas:read:display-peer"
+  }]
+}
+```
+
+The destination must equal the canonical gateway owner. Rules are exact local
+bindings, not caller payload fields. The resource/operation must also appear in
+the router's configured caller/subject allowlist. Mycelium's existing `peer_list`
+and authority-filtered `access_list` RPCs supply current authorization and expiry;
+Unibus does not reimplement signature validation, grant issuance or revocation.
+
+In this explicit mode, the bootstrap grant/policy expiry no longer controls runtime
+access: the local config pins allowable identities/resources/actions, while a fresh
+authority query controls the time-bound permission before every dispatch and every
+result. Bootstrap config still must be fresh and valid at startup. No stale allows
+are cached; outage, missing binding, revocation or expiry denies access. Authority
+IPC runs outside route/pending-state locks, with one concurrent query and no queued
+query backlog. An expired answer is rejected after IPC completes. The existing
+authority client bounds each RPC read/write to five seconds; this is a control-plane
+path, not a per-frame media authorization path.
+
+Adapter leases may renew independently within their original explicit resource
+permit and 300-second lease bound. That only advertises availability: it cannot add
+caller permissions or obtain an authority grant. Request IDs remain retained for
+300 seconds in managed mode; this is not durable exactly-once execution. Without
+the feature/config, the original static expiry checks remain unchanged. Setting
+the variable without the feature fails startup loudly.
+
+For verification, enable `managed-gateway,owner-catalog` when running router tests.
+Tests cover renewed access after bootstrap expiry, authority loss/revocation blocking
+outstanding results, denied operations and recorded Mycelium expiry/revocation RPCs.
+Live authority provisioning, long-running adapter credential/lease renewal and
+cross-site qualification have not been performed by these tests.
 
 ## Verification
 
