@@ -19,6 +19,7 @@ pub mod discovery;
 pub mod envelope;
 pub mod framing;
 pub mod grants;
+pub mod gateway;
 pub mod kinds;
 pub mod peer;
 pub mod qos;
