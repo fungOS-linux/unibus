@@ -17,6 +17,18 @@ const HANDSHAKE: Duration = Duration::from_secs(15);
 const IO_LIMIT: Duration = Duration::from_secs(5);
 const READY: &str = "unibus.direct.ready.v1";
 
+/// Application identity verification is independent of encryption and ACLs.
+pub trait EndpointIdentity: Send + Sync {
+    fn local_proof(&self) -> Result<serde_json::Value, PeerError>;
+    fn verify(
+        &self,
+        producer: &str,
+        handshake_key: &str,
+        proof: &serde_json::Value,
+        now: u64,
+    ) -> Result<(), PeerError>;
+}
+
 #[derive(Clone)]
 pub struct SessionConfig {
     pub verifier: Arc<dyn DirectSessionVerifier>,
@@ -27,9 +39,28 @@ pub struct SessionConfig {
     pub allowed_relays: BTreeSet<String>,
     /// Additional policy may deny, never authorize an unsigned session.
     pub access_policy: Option<Arc<dyn PeerAccessPolicy>>,
+    /// If configured, proofs are mandatory in both directions; no downgrade.
+    pub endpoint_identity: Option<Arc<dyn EndpointIdentity>>,
 }
 
 impl SessionConfig {
+    fn identity_proof(&self) -> Result<serde_json::Value, PeerError> {
+        match &self.endpoint_identity {
+            Some(identity) => identity.local_proof(),
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+    fn verify_identity(
+        &self,
+        producer: &str,
+        key: &str,
+        proof: &serde_json::Value,
+    ) -> Result<(), PeerError> {
+        if let Some(identity) = &self.endpoint_identity {
+            identity.verify(producer, key, proof, now_s())?;
+        }
+        Ok(())
+    }
     fn verify(
         &self,
         assertion: &str,
@@ -121,11 +152,11 @@ impl PeerTransport for IrohTransport {
                         "",
                         Message::new(
                             unibus::direct::DIRECT_AUTH_KIND,
-                            serde_json::json!({"assertion":assertion}),
+                            serde_json::json!({"assertion":assertion, "identity":self.config.identity_proof()?}),
                         ),
                     );
                     send.write_all(
-                        &unibus::encode_frame(&hello, &[]).map_err(|e| error(e.to_string()))?,
+                        &authentication_frame(&hello)?,
                     )
                     .await
                     .map_err(|e| error(e.to_string()))?;
@@ -147,11 +178,13 @@ impl PeerTransport for IrohTransport {
                     {
                         return Err(error("invalid Iroh session admission acknowledgement"));
                     }
+                    self.config.verify_identity(&candidate.peer_id, &connection.remote_id().to_string(), &ack.message.body["identity"])?;
                     let session = IrohSession {
                         connection,
                         claims: claims.clone(),
                         config: self.config.clone(),
                         remote: candidate.peer_id.clone(),
+                        remote_proof: ack.message.body["identity"].clone(),
                     };
                     session.authorize_admission(false).await?;
                     admission.0 = None;
@@ -232,11 +265,13 @@ impl IrohListener {
                     "authenticated producer differs from Iroh session claim",
                 ));
             }
+            self.config.verify_identity(&remote, &connection.remote_id().to_string(), &hello.message.body["identity"])?;
             let session = IrohSession {
                 connection,
                 claims,
                 config: self.config.clone(),
                 remote,
+                remote_proof: hello.message.body["identity"].clone(),
             };
             session.authorize_admission(true).await?;
             let ack = Envelope::new(
@@ -244,9 +279,9 @@ impl IrohListener {
                 &self.config.local_producer,
                 Some(&session.remote),
                 "",
-                Message::new(READY, serde_json::json!({"session_id":session.claims.jti})),
+                Message::new(READY, serde_json::json!({"session_id":session.claims.jti, "identity":self.config.identity_proof()?})),
             );
-            send.write_all(&unibus::encode_frame(&ack, &[]).map_err(|e| error(e.to_string()))?)
+            send.write_all(&authentication_frame(&ack)?)
                 .await
                 .map_err(|e| error(e.to_string()))?;
             send.finish().map_err(|e| error(e.to_string()))?;
@@ -263,6 +298,7 @@ pub struct IrohSession {
     claims: DirectSessionClaims,
     config: SessionConfig,
     remote: String,
+    remote_proof: serde_json::Value,
 }
 
 struct AdmissionGuard(Option<Connection>);
@@ -282,6 +318,11 @@ impl Drop for IrohSession {
 
 impl IrohSession {
     async fn authorize_admission(&self, incoming: bool) -> Result<(), PeerError> {
+        self.config.verify_identity(
+            &self.remote,
+            &self.connection.remote_id().to_string(),
+            &self.remote_proof,
+        )?;
         let (source, destination) = if incoming {
             (&self.remote, &self.config.local_producer)
         } else {
@@ -315,11 +356,21 @@ impl IrohSession {
         source: &str,
         destination: &str,
     ) -> Result<(), PeerError> {
+        self.config.verify_identity(
+            &self.remote,
+            &self.connection.remote_id().to_string(),
+            &self.remote_proof,
+        )?;
         self.claims
             .authorize_frame(envelope, payload_len, source, now_ms())
             .map_err(|e| error(e.to_string()))?;
         self.policy(source, destination, &envelope.message.kind)
             .await?;
+        self.config.verify_identity(
+            &self.remote,
+            &self.connection.remote_id().to_string(),
+            &self.remote_proof,
+        )?;
         self.claims
             .authorize_frame(envelope, payload_len, source, now_ms())
             .map_err(|e| error(e.to_string()))
@@ -435,6 +486,14 @@ fn error(message: impl Into<String>) -> PeerError {
     PeerError(message.into())
 }
 
+fn authentication_frame(envelope: &Envelope) -> Result<Vec<u8>, PeerError> {
+    let frame = unibus::encode_frame(envelope, &[]).map_err(|e| error(e.to_string()))?;
+    if frame.len() > AUTH_LIMIT {
+        return Err(error("identity authentication frame exceeds bound"));
+    }
+    Ok(frame)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,10 +526,24 @@ mod tests {
             local_producer: producer.into(),
             allowed_relays: BTreeSet::new(),
             access_policy: None,
+            endpoint_identity: None,
         }
     }
     #[tokio::test]
     async fn encrypted_loopback_round_trip_and_scope_denial() {
+        round_trip(0).await;
+    }
+    #[cfg(feature = "fleet-identity")]
+    #[tokio::test]
+    async fn signed_fleet_identity_round_trip_and_live_revocation() {
+        round_trip(1).await;
+    }
+    #[cfg(feature = "fleet-identity")]
+    #[tokio::test]
+    async fn missing_remote_proof_cannot_downgrade_identity() {
+        round_trip(2).await;
+    }
+    async fn round_trip(_fleet_identity: u8) {
         let a = endpoint().await;
         let b = endpoint().await;
         let binding = |producer: &str, endpoint: &Endpoint| unibus::direct::PeerBinding {
@@ -502,11 +575,34 @@ mod tests {
                 relay_urls: vec![],
             }],
         };
-        let transport = IrohTransport::new(a.clone(), config("a"));
-        let listener = IrohListener::new(b.clone(), config("b"));
+        #[allow(unused_mut)]
+        let mut client_config = config("a");
+        #[allow(unused_mut)]
+        let mut server_config = config("b");
+        #[cfg(feature = "fleet-identity")]
+        let revoked = if _fleet_identity > 0 {
+            let (client, server, _, revoked) =
+                crate::identity::tests::pair(&a.id().to_string(), &b.id().to_string(), now_s());
+            client_config.endpoint_identity = Some(client);
+            if _fleet_identity == 1 {
+                server_config.endpoint_identity = Some(server);
+            }
+            Some(revoked)
+        } else {
+            None
+        };
+        let transport = IrohTransport::new(a.clone(), client_config);
+        let listener = IrohListener::new(b.clone(), server_config);
         let assertion = serde_json::to_string(&claims).unwrap();
         let (client, server) =
             tokio::join!(transport.connect(&candidate, &assertion), listener.accept());
+        if _fleet_identity == 2 {
+            assert!(client.is_err());
+            drop(server);
+            a.close().await;
+            b.close().await;
+            return;
+        }
         let mut client = client.unwrap();
         let mut server = server.unwrap();
         let mut message = Envelope::new(
@@ -530,6 +626,12 @@ mod tests {
         assert_eq!(client.receive().await.unwrap().0.producer_id, "b");
         message.destination = Some("intruder".into());
         assert!(client.send(&message, &[0, 128, 255]).await.is_err());
+        #[cfg(feature = "fleet-identity")]
+        if let Some(revoked) = revoked {
+            message.destination = Some("b".into());
+            revoked.store(true, std::sync::atomic::Ordering::SeqCst);
+            assert!(client.send(&message, &[0, 128, 255]).await.is_err());
+        }
         drop(client);
         drop(server);
         a.close().await;

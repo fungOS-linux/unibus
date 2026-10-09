@@ -6,6 +6,38 @@ It carries bounded reliable Unibus envelopes and binary payloads using ALPN
 `unibus/peer/1`, with one FIN-delimited QUIC stream per message. This slice does
 not add unreliable media datagrams, A/V clock synchronization, or router wiring.
 
+## Fleet identity without inner TLS
+
+Enable `fleet-identity` to reuse the pinned `mycelium-peer-protocol` verifier.
+Iroh provides native encryption and endpoint-key possession; no TLS session is
+nested inside the stream. `FleetProof` carries an authority-signed membership
+and a machine-signed endpoint credential. `FleetIdentity` verifies both against
+the actual connected Iroh key, not the advertised key alone.
+
+Configure `SessionConfig.endpoint_identity = Some(Arc::new(FleetIdentity::new(
+local_proof, trust_source, producer_bindings)))` on both peers. Producer bindings
+pin both the canonical machine and endpoint credential slot. Missing or invalid
+proofs deny admission when configured; there is no retry that disables identity
+verification. Proofs are exchanged in both the authentication and ready frames,
+bounded to 64 KiB. Remote identity is rechecked for each message, including after
+an asynchronous ACL query, so expiry, refreshed revocations and stale trust state
+also stop existing sessions from exchanging further messages.
+
+`FleetTrustSource` is a nonblocking local-state interface. Its implementation
+must durably retain verified revocations and generation floors, reject unknown
+slots, and supply a bounded-freshness snapshot from trusted enrollment state.
+The adapter rejects stale/future snapshots and missing positive generation
+floors. It does not fetch authority keys from callers or create a new identity
+database. Production issuance, renewal and durable trust storage are embedding
+responsibilities, not implemented by this library slice.
+
+Identity does not replace the signed scoped session or `PeerAccessPolicy`.
+The existing session-only mode remains available when no endpoint identity
+verifier is configured. Mycelium is optional; this feature links its small
+portable protocol library, not its daemon. Run
+`cargo test -p unibus-iroh --features fleet-identity` to exercise real signed
+proofs over actual encrypted loopback, including live revocation denial.
+
 ## Ownership and authorization
 
 - Mycelium discovers application-owned endpoints and can manage grants.

@@ -9,6 +9,8 @@ pub const CATALOG: &str = "unibus.iroh.gateways.v1";
 pub const PEER_ALPN: &str = "unibus/peer/1";
 pub mod bus;
 pub mod directory;
+#[cfg(feature = "fleet-identity")]
+pub mod identity;
 #[cfg(feature = "transport")]
 pub mod transport;
 
