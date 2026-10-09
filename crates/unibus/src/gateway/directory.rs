@@ -65,10 +65,10 @@ impl<D: ServiceDirectory> GatewayDirectory<D> {
             {
                 return Err(PeerError("gateway observation and lease disagree".into()));
             }
-            if let Some(existing) = leases.get(&lease.gateway_peer_id) {
-                if existing != &lease {
-                    return Err(PeerError("conflicting gateway leases".into()));
-                }
+            if let Some(existing) = leases.get(&lease.gateway_peer_id)
+                && existing != &lease
+            {
+                return Err(PeerError("conflicting gateway leases".into()));
             }
             leases.insert(lease.gateway_peer_id.clone(), lease);
             if leases.len() > 32 {
