@@ -13,6 +13,22 @@ pub const GATEWAY_SERVICE_KIND: &str = "unibus-gateway";
 pub const MAX_GATEWAY_LEASE_SECS: u64 = 300;
 pub mod directory;
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayDispatch {
+    pub caller_producer: String,
+    pub invocation: GatewayInvoke,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayResult {
+    pub caller_producer: String,
+    pub request_id: String,
+    pub resource: ResourceId,
+    pub generation: u64,
+    pub output: serde_json::Value,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(
     tag = "kind",

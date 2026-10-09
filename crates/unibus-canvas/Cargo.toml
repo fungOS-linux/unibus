@@ -1,0 +1,13 @@
+[package]
+name = "unibus-canvas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Explicit Canvas resource adapter using the owner-local canvasctl interface"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+unibus.workspace = true
+tokio = { workspace = true, features = ["process", "time"] }

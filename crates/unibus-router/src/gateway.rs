@@ -136,21 +136,7 @@ impl GatewayConfig {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GatewayDispatch {
-    pub caller_producer: String,
-    pub invocation: GatewayInvoke,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GatewayResult {
-    pub caller_producer: String,
-    pub request_id: String,
-    pub resource: ResourceId,
-    pub generation: u64,
-    pub output: serde_json::Value,
-}
+pub use unibus::gateway::{GatewayDispatch, GatewayResult};
 struct Pending {
     invocation: GatewayInvoke,
     subject: String,

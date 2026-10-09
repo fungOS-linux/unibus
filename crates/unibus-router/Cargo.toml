@@ -29,5 +29,6 @@ sha2 = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
+unibus-canvas = { path = "../unibus-canvas" }
 tempfile = { workspace = true }
 rcgen = "0.14"

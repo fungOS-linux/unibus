@@ -67,6 +67,26 @@ fn connect(addr: std::net::SocketAddr, producer: &str) -> TcpStream {
 }
 #[test]
 fn authenticated_daemon_routes_only_explicit_resource_and_correlates_reply() {
+    exercise_gateway("app.read", None);
+}
+
+#[test]
+#[ignore = "requires an owner-local live Canvas and UNIBUS_CANVASCTL absolute path"]
+fn live_canvas_inspection_through_authenticated_gateway() {
+    let path = std::env::var_os("UNIBUS_CANVASCTL").expect("UNIBUS_CANVASCTL required");
+    let resource =
+        serde_json::from_value(json!({"scope":{"kind":"peer","id":"test-host"},"key":"test-app"}))
+            .unwrap();
+    exercise_gateway(
+        unibus_canvas::INSPECT,
+        Some(unibus_canvas::CanvasAdapter {
+            resource,
+            canvasctl: path.into(),
+        }),
+    );
+}
+
+fn exercise_gateway(operation: &str, adapter: Option<unibus_canvas::CanvasAdapter>) {
     let config:HubConfig=serde_json::from_value(json!({"installation_id":"test","listen":"127.0.0.1:0","nodes":[
         {"producer_id":"caller","auth_subject":"test/caller","capabilities":[],"publishes":[GATEWAY_INVOKE]},
         {"producer_id":"backend","auth_subject":"test/backend","capabilities":[],"publishes":[GATEWAY_RESULT,GATEWAY_REGISTER,GATEWAY_RELEASE]}
@@ -76,9 +96,9 @@ fn authenticated_daemon_routes_only_explicit_resource_and_correlates_reply() {
     let gateway:GatewayConfig=serde_json::from_value(json!({"gateway_peer_id":"test-host","policy_expires_at_unix_s":now+60,
         "routes":[{"backend_producer":"backend","lease":{"schema_version":1,"resource":resource,"gateway_peer_id":"test-host","source_service_id":"test/app",
             "endpoint":{"peer_id":"unibus-local","endpoints":[{"transport":"quic","host":"gateway.test","port":9999}],"expires_at_unix_s":now+60},
-            "generation":1,"observed_at_unix_s":now,"expires_at_unix_s":now+60,"operations":["app.read"],
+            "generation":1,"observed_at_unix_s":now,"expires_at_unix_s":now+60,"operations":[operation],
             "native_security":{"encryption":"absent","authentication":"present"}}}],
-        "grants":[{"caller_producer":"caller","auth_subject":"test/caller","resource":resource,"operations":["app.read"],"expires_at_unix_s":now+60}]
+        "grants":[{"caller_producer":"caller","auth_subject":"test/caller","resource":resource,"operations":[operation],"expires_at_unix_s":now+60}]
     })).unwrap();
     let initial_lease = gateway.routes[0].lease.clone();
     let hub = Arc::new(
@@ -106,7 +126,7 @@ fn authenticated_daemon_routes_only_explicit_resource_and_correlates_reply() {
     write_frame(&mut backend, &registration, &[]).unwrap();
     assert_eq!(receive(&mut backend, "reply").message.body["success"], true);
     let mut caller = connect(addr, "caller");
-    let invoke:GatewayInvoke=serde_json::from_value(json!({"schema_version":1,"request_id":"request-1","resource":resource,"generation":1,"operation":"app.read","input":{}})).unwrap();
+    let invoke:GatewayInvoke=serde_json::from_value(json!({"schema_version":1,"request_id":"request-1","resource":resource,"generation":1,"operation":operation,"input":{}})).unwrap();
     let mut request = Envelope::new(
         "test",
         "caller",
@@ -122,12 +142,27 @@ fn authenticated_daemon_routes_only_explicit_resource_and_correlates_reply() {
     let dispatch: GatewayDispatch =
         serde_json::from_value(serde_json::Value::Object(dispatched.message.body)).unwrap();
     assert_eq!(dispatch.caller_producer, "caller");
+    let output = match adapter {
+        Some(adapter) => {
+            let reply = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(adapter.execute(&dispatch.invocation))
+                .unwrap();
+            assert_eq!(reply["outcome"]["status"], "ok");
+            println!(
+                "Live Canvas gateway reply: {}",
+                serde_json::to_string(&reply).unwrap()
+            );
+            reply
+        }
+        None => json!({"value":42}),
+    };
     let result = GatewayResult {
         caller_producer: dispatch.caller_producer,
         request_id: dispatch.invocation.request_id,
         resource: dispatch.invocation.resource,
         generation: 1,
-        output: json!({"value":42}),
+        output: output.clone(),
     };
     let mut reply = Envelope::new(
         "test",
@@ -139,8 +174,8 @@ fn authenticated_daemon_routes_only_explicit_resource_and_correlates_reply() {
     reply.schema_version = 2;
     write_frame(&mut backend, &reply, &[]).unwrap();
     assert_eq!(
-        receive(&mut caller, GATEWAY_RESULT).message.body["output"]["value"],
-        42
+        receive(&mut caller, GATEWAY_RESULT).message.body["output"],
+        output
     );
     let mut denied = invoke;
     denied.request_id = "request-2".into();
@@ -175,7 +210,7 @@ fn authenticated_daemon_routes_only_explicit_resource_and_correlates_reply() {
     request
         .message
         .body
-        .insert("operation".into(), "app.read".into());
+        .insert("operation".into(), operation.into());
     write_frame(&mut caller, &request, &[]).unwrap();
     assert_eq!(receive(&mut caller, "reply").message.body["success"], false);
 }
