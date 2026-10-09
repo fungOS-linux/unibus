@@ -7,7 +7,11 @@ use std::collections::BTreeSet;
 pub const GATEWAY_SCHEMA: u32 = 1;
 pub const GATEWAY_INVOKE: &str = "unibus.gateway.invoke.v1";
 pub const GATEWAY_RESULT: &str = "unibus.gateway.result.v1";
+pub const GATEWAY_REGISTER: &str = "unibus.gateway.register.v1";
+pub const GATEWAY_RELEASE: &str = "unibus.gateway.release.v1";
+pub const GATEWAY_SERVICE_KIND: &str = "unibus-gateway";
 pub const MAX_GATEWAY_LEASE_SECS: u64 = 300;
+pub mod directory;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(
@@ -70,6 +74,31 @@ pub struct GatewayLease {
     pub native_security: NativeSecurity,
 }
 impl GatewayLease {
+    pub fn connection_hints(&self) -> Result<BTreeSet<String>, PeerError> {
+        let mut hints = BTreeSet::new();
+        for endpoint in &self.endpoint.endpoints {
+            let scheme = match endpoint.transport {
+                crate::Transport::Quic => "quic",
+                crate::Transport::TcpTls => "tcp",
+                crate::Transport::Relay => {
+                    return Err(PeerError("application relay needs explicit adapter".into()));
+                }
+            };
+            let host = if endpoint.host.contains(':') {
+                format!("[{}]", endpoint.host)
+            } else {
+                endpoint.host.clone()
+            };
+            hints.insert(format!("{scheme}://{host}:{}", endpoint.port));
+        }
+        hints.extend(
+            self.endpoint
+                .iroh_endpoints
+                .iter()
+                .map(|e| format!("iroh://{}", e.endpoint_id)),
+        );
+        Ok(hints)
+    }
     pub fn validate_at(&self, now: u64) -> Result<(), PeerError> {
         self.resource.validate()?;
         identifier(&self.gateway_peer_id)?;
@@ -111,6 +140,18 @@ pub struct GatewayInvoke {
     pub operation: String,
     /// Adapter-specific input, never interpreted as a generic proxy URL.
     pub input: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayRegistration {
+    pub lease: GatewayLease,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayRelease {
+    pub resource: ResourceId,
+    pub generation: u64,
 }
 impl GatewayInvoke {
     pub fn validate(&self) -> Result<(), PeerError> {

@@ -4,19 +4,21 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Mutex,
+    sync::{Arc, Mutex, RwLock},
 };
 use unibus::{
     Envelope, Message,
     gateway::{
-        GATEWAY_INVOKE, GATEWAY_RESULT, GatewayInvoke, GatewayLease, ResourceId, identifier,
-        operations,
+        GATEWAY_INVOKE, GATEWAY_REGISTER, GATEWAY_RELEASE, GATEWAY_RESULT, GatewayInvoke,
+        GatewayLease, GatewayRegistration, GatewayRelease, ResourceId, identifier, operations,
     },
 };
 
 const MAX_ROUTES: usize = 128;
 const MAX_PENDING: usize = 256;
 const MAX_RETAINED_IDS: usize = 4096;
+#[cfg(feature = "owner-catalog")]
+pub mod catalog;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -159,16 +161,209 @@ struct Pending {
 }
 
 pub struct GatewayRouter {
-    config: GatewayConfig,
+    config: RwLock<GatewayConfig>,
+    permits: BTreeMap<ResourceId, RegistrationPermit>,
+    floors: Mutex<BTreeMap<ResourceId, u64>>,
+    registered: RwLock<BTreeSet<ResourceId>>,
     pending: Mutex<BTreeMap<(String, String), Pending>>,
+    publisher: Option<Arc<dyn GatewayCatalogSink>>,
+    publication: Mutex<()>,
+}
+struct RegistrationPermit {
+    backend: String,
+    service: String,
+    producer: String,
+    operations: BTreeSet<String>,
+}
+/// Optional local publication seam. Never grants access or proxies traffic.
+pub trait GatewayCatalogSink: Send + Sync {
+    fn publish(&self, leases: &[GatewayLease], now: u64) -> Result<()>;
 }
 impl GatewayRouter {
+    pub fn gateway_peer_id(&self) -> Result<String> {
+        Ok(self
+            .config
+            .read()
+            .map_err(|_| anyhow::anyhow!("gateway policy state unavailable"))?
+            .gateway_peer_id
+            .clone())
+    }
     pub fn new(config: GatewayConfig, now: u64) -> Result<Self> {
         config.validate_at(now)?;
+        let permits = config
+            .routes
+            .iter()
+            .map(|r| {
+                (
+                    r.lease.resource.clone(),
+                    RegistrationPermit {
+                        backend: r.backend_producer.clone(),
+                        service: r.lease.source_service_id.clone(),
+                        producer: r.lease.endpoint.peer_id.clone(),
+                        operations: r.lease.operations.clone(),
+                    },
+                )
+            })
+            .collect();
+        let floors = config
+            .routes
+            .iter()
+            .map(|r| (r.lease.resource.clone(), r.lease.generation))
+            .collect();
         Ok(Self {
-            config,
+            config: RwLock::new(config),
+            permits,
+            floors: Mutex::new(floors),
+            registered: RwLock::new(BTreeSet::new()),
             pending: Mutex::new(BTreeMap::new()),
+            publisher: None,
+            publication: Mutex::new(()),
         })
+    }
+    pub fn with_catalog_sink(mut self, sink: Arc<dyn GatewayCatalogSink>) -> Self {
+        self.publisher = Some(sink);
+        self
+    }
+    pub fn active_leases(&self, now: u64) -> Result<Vec<GatewayLease>> {
+        let config = self
+            .config
+            .read()
+            .map_err(|_| anyhow::anyhow!("gateway policy state unavailable"))?;
+        if now >= config.policy_expires_at_unix_s {
+            return Ok(vec![]);
+        }
+        let registered = self
+            .registered
+            .read()
+            .map_err(|_| anyhow::anyhow!("gateway registrations unavailable"))?;
+        Ok(config
+            .routes
+            .iter()
+            .filter(|r| registered.contains(&r.lease.resource) && r.lease.validate_at(now).is_ok())
+            .map(|r| {
+                let mut lease = r.lease.clone();
+                lease.expires_at_unix_s =
+                    lease.expires_at_unix_s.min(config.policy_expires_at_unix_s);
+                lease
+            })
+            .collect())
+    }
+    pub fn publish_catalog(&self, now: u64) -> Result<()> {
+        if let Some(publisher) = &self.publisher {
+            let _serial = self
+                .publication
+                .lock()
+                .map_err(|_| anyhow::anyhow!("gateway publication state unavailable"))?;
+            publisher.publish(&self.active_leases(now)?, now)?;
+        }
+        Ok(())
+    }
+    fn register(&self, source: &str, lease: GatewayLease, now: u64) -> Result<()> {
+        lease.validate_at(now)?;
+        let permit = self
+            .permits
+            .get(&lease.resource)
+            .context("adapter has no declared resource registration permit")?;
+        ensure!(
+            permit.backend == source
+                && permit.service == lease.source_service_id
+                && permit.producer == lease.endpoint.peer_id
+                && lease.operations.is_subset(&permit.operations),
+            "adapter registration exceeds declared resource binding"
+        );
+        let mut config = self
+            .config
+            .write()
+            .map_err(|_| anyhow::anyhow!("gateway policy state unavailable"))?;
+        lease.require_owner(&config.gateway_peer_id)?;
+        ensure!(
+            now < config.policy_expires_at_unix_s
+                && lease.expires_at_unix_s <= config.policy_expires_at_unix_s,
+            "registration cannot renew or outlive access policy"
+        );
+        let mut floors = self
+            .floors
+            .lock()
+            .map_err(|_| anyhow::anyhow!("gateway generations unavailable"))?;
+        ensure!(
+            lease.generation
+                >= *floors
+                    .get(&lease.resource)
+                    .context("missing gateway generation floor")?,
+            "retired gateway generation"
+        );
+        if let Some(route) = config
+            .routes
+            .iter_mut()
+            .find(|r| r.lease.resource == lease.resource)
+        {
+            if route.lease != lease {
+                ensure!(
+                    lease.observed_at_unix_s > route.lease.observed_at_unix_s,
+                    "stale or conflicting gateway renewal"
+                );
+                if lease.generation == route.lease.generation {
+                    ensure!(
+                        lease.endpoint.endpoints == route.lease.endpoint.endpoints
+                            && lease.endpoint.iroh_endpoints == route.lease.endpoint.iroh_endpoints
+                            && lease.operations == route.lease.operations
+                            && lease.native_security == route.lease.native_security,
+                        "changed resource requires a new generation"
+                    );
+                }
+            }
+            route.lease = lease.clone();
+        } else {
+            config.routes.push(LocalRoute {
+                lease: lease.clone(),
+                backend_producer: source.into(),
+            });
+        }
+        floors.insert(lease.resource.clone(), lease.generation);
+        self.registered
+            .write()
+            .map_err(|_| anyhow::anyhow!("gateway registrations unavailable"))?
+            .insert(lease.resource.clone());
+        drop(floors);
+        drop(config);
+        self.publish_catalog(now)
+    }
+    fn release(&self, source: &str, release: GatewayRelease, now: u64) -> Result<()> {
+        let permit = self
+            .permits
+            .get(&release.resource)
+            .context("unknown registration permit")?;
+        ensure!(permit.backend == source, "adapter does not own resource");
+        let mut config = self
+            .config
+            .write()
+            .map_err(|_| anyhow::anyhow!("gateway policy state unavailable"))?;
+        let route = config
+            .routes
+            .iter()
+            .find(|r| r.lease.resource == release.resource)
+            .context("resource already released")?;
+        ensure!(
+            route.lease.generation == release.generation,
+            "release generation mismatch"
+        );
+        let next = release
+            .generation
+            .checked_add(1)
+            .context("resource generation exhausted")?;
+        self.floors
+            .lock()
+            .map_err(|_| anyhow::anyhow!("gateway generations unavailable"))?
+            .insert(release.resource.clone(), next);
+        config
+            .routes
+            .retain(|r| r.lease.resource != release.resource);
+        self.registered
+            .write()
+            .map_err(|_| anyhow::anyhow!("gateway registrations unavailable"))?
+            .remove(&release.resource);
+        drop(config);
+        self.publish_catalog(now)
     }
 }
 impl HubPlugin for GatewayRouter {
@@ -181,7 +376,7 @@ impl HubPlugin for GatewayRouter {
     ) -> Result<bool> {
         if !matches!(
             envelope.message.kind.as_str(),
-            GATEWAY_INVOKE | GATEWAY_RESULT
+            GATEWAY_INVOKE | GATEWAY_RESULT | GATEWAY_REGISTER | GATEWAY_RELEASE
         ) {
             return Ok(false);
         }
@@ -191,6 +386,34 @@ impl HubPlugin for GatewayRouter {
         );
         let now_ms = unibus::envelope::now_ms();
         envelope.validate(hub.installation_id(), now_ms)?;
+        if matches!(
+            envelope.message.kind.as_str(),
+            GATEWAY_REGISTER | GATEWAY_RELEASE
+        ) {
+            ensure!(
+                serde_json::to_vec(&envelope.message.body)?.len() <= 65536,
+                "gateway registration exceeds bound"
+            );
+            ensure!(
+                !hub.grant_of(source)
+                    .context("unregistered adapter")?
+                    .auth_subject
+                    .is_empty(),
+                "adapter registration requires authenticated subject"
+            );
+            let body = serde_json::Value::Object(envelope.message.body.clone());
+            if envelope.message.kind == GATEWAY_REGISTER {
+                let registration: GatewayRegistration = serde_json::from_value(body)?;
+                self.register(source, registration.lease, now_ms / 1000)?;
+            } else {
+                self.release(source, serde_json::from_value(body)?, now_ms / 1000)?;
+            }
+            return Ok(true);
+        }
+        let config = self
+            .config
+            .read()
+            .map_err(|_| anyhow::anyhow!("gateway policy state unavailable"))?;
         let mut pending = self
             .pending
             .lock()
@@ -203,8 +426,7 @@ impl HubPlugin for GatewayRouter {
                 .grant_of(source)
                 .context("gateway caller is not registered")?;
             let route =
-                self.config
-                    .resolve(source, &identity.auth_subject, &invocation, now_ms / 1000)?;
+                config.resolve(source, &identity.auth_subject, &invocation, now_ms / 1000)?;
             ensure!(
                 hub.connection(&route.backend_producer).is_some(),
                 "gateway adapter disconnected"
@@ -243,12 +465,14 @@ impl HubPlugin for GatewayRouter {
                     subject: identity.auth_subject,
                     backend: route.backend_producer.clone(),
                     expires_at_ms,
-                    retain_until_ms: self.config.policy_expires_at_unix_s.saturating_mul(1000),
+                    retain_until_ms: config.policy_expires_at_unix_s.saturating_mul(1000),
                     completed: false,
                 },
             );
             drop(pending);
-            if let Err(error) = hub.send_to_producer(&route.backend_producer, &forwarded, &[]) {
+            let backend = route.backend_producer.clone();
+            drop(config);
+            if let Err(error) = hub.send_to_producer(&backend, &forwarded, &[]) {
                 // Delivery may be uncertain. Retain the ID to avoid re-executing.
                 self.pending
                     .lock()
@@ -279,7 +503,7 @@ impl HubPlugin for GatewayRouter {
                     && result.generation == request.invocation.generation,
                 "gateway result does not match adapter and resource"
             );
-            self.config.resolve(
+            config.resolve(
                 &result.caller_producer,
                 &request.subject,
                 &request.invocation,
@@ -300,6 +524,7 @@ impl HubPlugin for GatewayRouter {
                 .context("gateway request lost")?
                 .completed = true;
             drop(pending);
+            drop(config);
             hub.send_to_producer(&result.caller_producer, &forwarded, &[])?;
         }
         Ok(true)
@@ -379,6 +604,86 @@ mod tests {
         }
     }
     #[test]
+    fn renewal_release_and_rebinding_do_not_create_permissions() {
+        let config = configuration(100);
+        let mut lease = config.routes[0].lease.clone();
+        let router = GatewayRouter::new(config, 100).unwrap();
+        lease.observed_at_unix_s = 101;
+        assert!(router.register("intruder", lease.clone(), 101).is_err());
+        router.register("canvas", lease.clone(), 101).unwrap();
+        let mut expanded = lease.clone();
+        expanded.operations.insert("canvas.admin".into());
+        expanded.generation = 2;
+        expanded.observed_at_unix_s = 102;
+        assert!(router.register("canvas", expanded, 102).is_err());
+        router
+            .release(
+                "canvas",
+                GatewayRelease {
+                    resource: lease.resource.clone(),
+                    generation: 1,
+                },
+                103,
+            )
+            .unwrap();
+        assert!(router.active_leases(103).unwrap().is_empty());
+        lease.observed_at_unix_s = 104;
+        assert!(router.register("canvas", lease.clone(), 104).is_err());
+        lease.generation = 2;
+        router.register("canvas", lease.clone(), 104).unwrap();
+        lease.expires_at_unix_s = 161;
+        lease.endpoint.expires_at_unix_s = 161;
+        lease.observed_at_unix_s = 105;
+        assert!(router.register("canvas", lease, 105).is_err());
+        assert!(router.active_leases(160).unwrap().is_empty());
+    }
+    #[cfg(feature = "owner-catalog")]
+    #[test]
+    fn published_lease_is_consumed_through_provider_neutral_directory() {
+        let config = configuration(100);
+        let resource = config.routes[0].lease.resource.clone();
+        let lease = config.routes[0].lease.clone();
+        let router = GatewayRouter::new(config, 100).unwrap();
+        assert!(router.active_leases(100).unwrap().is_empty());
+        router.register("canvas", lease, 100).unwrap();
+        let catalog =
+            super::catalog::catalog("host", &router.active_leases(100).unwrap(), 100).unwrap();
+        if let Some(path) = std::env::var_os("FPL_TEST_OWNER_CATALOG_FILE") {
+            let publisher =
+                super::catalog::OwnerCatalogFile::new(path.into(), "host".into()).unwrap();
+            publisher
+                .publish(&router.active_leases(100).unwrap(), 100)
+                .unwrap();
+        }
+        let observations = catalog
+            .observations
+            .into_iter()
+            .map(|o| unibus::ServiceObservation {
+                service_id: o.service_id.0,
+                kind: o.value.kind,
+                endpoints: o.value.endpoints.into_iter().collect(),
+                observed_at_unix_s: o.observed_at,
+                expires_at_unix_s: o.expires_at,
+                provenance_provider: o.provenance.provider,
+                provenance_observer: o.provenance.observer,
+                attributes: o.value.attributes,
+            })
+            .collect::<Vec<_>>();
+        let directory = unibus::gateway::directory::GatewayDirectory::new(
+            unibus::StaticServiceDirectory::new(observations.clone()).unwrap(),
+            BTreeMap::from([("host".into(), "unibus-local".into())]),
+        );
+        assert_eq!(directory.gateways(&resource, 100).unwrap().len(), 1);
+        assert!(directory.gateways(&resource, 160).unwrap().is_empty());
+        let mut forged = observations;
+        forged[0].provenance_observer = "other".into();
+        let directory = unibus::gateway::directory::GatewayDirectory::new(
+            unibus::StaticServiceDirectory::new(forged).unwrap(),
+            BTreeMap::from([("host".into(), "unibus-local".into())]),
+        );
+        assert!(directory.gateways(&resource, 100).is_err());
+    }
+    #[test]
     fn exact_identity_resource_operation_and_freshness_are_required() {
         let config = configuration(100);
         let mut invoke = invocation(&config);
@@ -434,7 +739,7 @@ mod tests {
                 ("canvas".into(), backend.clone() as Arc<dyn Sink>),
             ]))),
         };
-        let mut router = GatewayRouter::new(config, now).unwrap();
+        let router = GatewayRouter::new(config, now).unwrap();
         let request = Envelope::new(
             "test",
             "caller",
@@ -478,7 +783,7 @@ mod tests {
             .message
             .body
             .insert("request_id".into(), "request-2".into());
-        router.config.policy_expires_at_unix_s = unibus::envelope::now_ms() / 1000;
+        router.config.write().unwrap().policy_expires_at_unix_s = unibus::envelope::now_ms() / 1000;
         assert!(router.handle(&hub, "canvas", &response, &[]).is_err());
         assert_eq!(caller.0.lock().unwrap().len(), 1);
     }

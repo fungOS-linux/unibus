@@ -1,10 +1,11 @@
-# Resource gateways: first implementation slice
+# Resource gateways
 
 One local Unibus router can serve as an explicit gateway for registered local
 applications. It reuses the existing daemon and authenticated adapter sessions;
 it does not create another service, scan LANs, or require Iroh. Mycelium catalog
-publication, dynamic registration and live Canvas/device pilots remain follow-up
-work under `unibus-resource-gateways`.
+publication uses an optional owner catalog; authenticated adapters can register,
+renew and release leases. Live Canvas/device pilots remain follow-up work under
+`unibus-resource-gateways`.
 
 ## Ownership
 
@@ -94,9 +95,40 @@ hold the gateway state mutex. Input and output are limited to 64 KiB.
 7. Let the policy expire and confirm both new calls and outstanding results fail
    closed. To remove this static pilot, unset the variable and restart the router.
 
-No live service restart/deployment has been performed for this implementation.
-Production dynamic renewal/revocation, Mycelium publication and mTLS/Iroh gateway
-daemon wiring are not delivered by the static local-app slice.
+## Adapter registration and catalog publication
+
+Configured routes are operator permits, not evidence that an adapter is alive.
+The authenticated backend publishes `unibus.gateway.register.v1` with a body
+`{"lease": <GatewayLease>}` to register or renew its permitted resource. Its normal
+node publication grant must explicitly allow that kind. Registration cannot change
+the backend, service identity, gateway owner, or expand the permitted operations.
+Lease expiry cannot exceed policy expiry. Endpoint, operation or security-posture
+changes require a newer generation; changed renewals require a newer observation.
+
+Publish `unibus.gateway.release.v1` with `{"resource": <ResourceId>, "generation": N}`
+to release the current generation. A lower generation cannot resurrect it within
+this router process. Generation floors are currently in-memory, not durable across
+restart. Static route invocation remains compatible, but only explicitly registered
+leases are exported as live observations.
+
+Build with `--features owner-catalog` and set `UNIBUS_GATEWAY_CATALOG` to an explicit
+absolute, dedicated owner file, normally Mycelium's `application-services.json`.
+The parent directory must exist. The publisher atomically writes bounded, private
+shared-schema observations and refuses to overwrite a different owner's catalog.
+Without the feature, setting the variable fails startup. Initial publication is
+empty; successful registration/release republishes the current registered leases.
+
+Mycelium reads that file during its existing scan and carries observations through
+the existing signed topology path. It preserves original expiry and loopback hints;
+it does not proxy traffic or grant access. The generic `GatewayDirectory` consumes
+service observations with an explicit trusted owner-to-producer mapping, verifies
+outer/inner lease agreement, and rejects conflicting duplicates. Discovery is not
+authorization: the destination Unibus router still checks every invocation/result.
+
+A release removes the local route immediately. Previously gossiped observations
+may remain until their original TTL expires; clearing the file is not a distributed
+revocation mechanism. Policy renewal/revocation is not yet dynamic. No live service
+restart/deployment or production mTLS/Iroh gateway qualification has been performed.
 
 ## Verification
 
@@ -105,6 +137,7 @@ Run on the build host:
 ```sh
 cargo check -p unibus -p unibus-router --tests
 cargo test -p unibus -p unibus-router
+cargo test -p unibus -p unibus-router --features owner-catalog
 ```
 
 Tests cover scoped identity collisions, strict schemas, lease owner/freshness,

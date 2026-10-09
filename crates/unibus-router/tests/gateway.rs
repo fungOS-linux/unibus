@@ -3,7 +3,10 @@ use serde_json::json;
 use std::{net::TcpStream, sync::Arc, time::Duration};
 use unibus::{
     AuthError, Envelope, Message, NodeClaims, OfflineVerifier,
-    gateway::{GATEWAY_INVOKE, GATEWAY_RESULT, GatewayInvoke},
+    gateway::{
+        GATEWAY_INVOKE, GATEWAY_REGISTER, GATEWAY_RELEASE, GATEWAY_RESULT, GatewayInvoke,
+        GatewayRegistration, GatewayRelease,
+    },
     read_frame, write_frame,
 };
 use unibus_router::{
@@ -66,7 +69,7 @@ fn connect(addr: std::net::SocketAddr, producer: &str) -> TcpStream {
 fn authenticated_daemon_routes_only_explicit_resource_and_correlates_reply() {
     let config:HubConfig=serde_json::from_value(json!({"installation_id":"test","listen":"127.0.0.1:0","nodes":[
         {"producer_id":"caller","auth_subject":"test/caller","capabilities":[],"publishes":[GATEWAY_INVOKE]},
-        {"producer_id":"backend","auth_subject":"test/backend","capabilities":[],"publishes":[GATEWAY_RESULT]}
+        {"producer_id":"backend","auth_subject":"test/backend","capabilities":[],"publishes":[GATEWAY_RESULT,GATEWAY_REGISTER,GATEWAY_RELEASE]}
     ]})).unwrap();
     let now = unibus::envelope::now_ms() / 1000;
     let resource = json!({"scope":{"kind":"peer","id":"test-host"},"key":"test-app"});
@@ -77,6 +80,7 @@ fn authenticated_daemon_routes_only_explicit_resource_and_correlates_reply() {
             "native_security":{"encryption":"absent","authentication":"present"}}}],
         "grants":[{"caller_producer":"caller","auth_subject":"test/caller","resource":resource,"operations":["app.read"],"expires_at_unix_s":now+60}]
     })).unwrap();
+    let initial_lease = gateway.routes[0].lease.clone();
     let hub = Arc::new(
         Hub::new(config)
             .unwrap()
@@ -85,6 +89,22 @@ fn authenticated_daemon_routes_only_explicit_resource_and_correlates_reply() {
     );
     let addr = hub.start().unwrap();
     let mut backend = connect(addr, "backend");
+    let mut registration = Envelope::new(
+        "test",
+        "backend",
+        None,
+        "",
+        Message::new(
+            GATEWAY_REGISTER,
+            serde_json::to_value(GatewayRegistration {
+                lease: initial_lease.clone(),
+            })
+            .unwrap(),
+        ),
+    );
+    registration.schema_version = 2;
+    write_frame(&mut backend, &registration, &[]).unwrap();
+    assert_eq!(receive(&mut backend, "reply").message.body["success"], true);
     let mut caller = connect(addr, "caller");
     let invoke:GatewayInvoke=serde_json::from_value(json!({"schema_version":1,"request_id":"request-1","resource":resource,"generation":1,"operation":"app.read","input":{}})).unwrap();
     let mut request = Envelope::new(
@@ -137,4 +157,25 @@ fn authenticated_daemon_routes_only_explicit_resource_and_correlates_reply() {
         }
     }
     assert!(denied);
+    assert_eq!(receive(&mut backend, "reply").message.body["success"], true);
+    registration.message = Message::new(
+        GATEWAY_RELEASE,
+        serde_json::to_value(GatewayRelease {
+            resource: initial_lease.resource,
+            generation: 1,
+        })
+        .unwrap(),
+    );
+    write_frame(&mut backend, &registration, &[]).unwrap();
+    assert_eq!(receive(&mut backend, "reply").message.body["success"], true);
+    request
+        .message
+        .body
+        .insert("request_id".into(), "request-3".into());
+    request
+        .message
+        .body
+        .insert("operation".into(), "app.read".into());
+    write_frame(&mut caller, &request, &[]).unwrap();
+    assert_eq!(receive(&mut caller, "reply").message.body["success"], false);
 }
