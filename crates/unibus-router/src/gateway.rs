@@ -19,6 +19,7 @@ const MAX_PENDING: usize = 256;
 const MAX_RETAINED_IDS: usize = 4096;
 #[cfg(feature = "owner-catalog")]
 pub mod catalog;
+pub mod generations;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -154,6 +155,7 @@ pub struct GatewayRouter {
     pending: Mutex<BTreeMap<(String, String), Pending>>,
     publisher: Option<Arc<dyn GatewayCatalogSink>>,
     publication: Mutex<()>,
+    generation_store: Option<Arc<dyn GenerationStore>>,
 }
 struct RegistrationPermit {
     backend: String,
@@ -164,6 +166,10 @@ struct RegistrationPermit {
 /// Optional local publication seam. Never grants access or proxies traffic.
 pub trait GatewayCatalogSink: Send + Sync {
     fn publish(&self, leases: &[GatewayLease], now: u64) -> Result<()>;
+}
+pub trait GenerationStore: Send + Sync {
+    fn load(&self, owner: &str) -> Result<BTreeMap<ResourceId, u64>>;
+    fn persist(&self, owner: &str, floors: &BTreeMap<ResourceId, u64>) -> Result<()>;
 }
 impl GatewayRouter {
     pub fn gateway_peer_id(&self) -> Result<String> {
@@ -204,7 +210,41 @@ impl GatewayRouter {
             pending: Mutex::new(BTreeMap::new()),
             publisher: None,
             publication: Mutex::new(()),
+            generation_store: None,
         })
+    }
+    pub fn with_generation_store(mut self, store: Arc<dyn GenerationStore>) -> Result<Self> {
+        let config = self
+            .config
+            .get_mut()
+            .map_err(|_| anyhow::anyhow!("gateway policy unavailable"))?;
+        let floors = self
+            .floors
+            .get_mut()
+            .map_err(|_| anyhow::anyhow!("gateway generations unavailable"))?;
+        for (resource, generation) in store.load(&config.gateway_peer_id)? {
+            floors
+                .entry(resource)
+                .and_modify(|floor| *floor = (*floor).max(generation))
+                .or_insert(generation);
+        }
+        ensure!(
+            floors.len() <= MAX_ROUTES,
+            "retained gateway generations exceed bound"
+        );
+        // Keep declared permits but never resurrect retired routes from startup config.
+        config
+            .routes
+            .retain(|route| route.lease.generation >= floors[&route.lease.resource]);
+        store.persist(&config.gateway_peer_id, floors)?;
+        self.generation_store = Some(store);
+        Ok(self)
+    }
+    fn persist_generations(&self, owner: &str, floors: &BTreeMap<ResourceId, u64>) -> Result<()> {
+        if let Some(store) = &self.generation_store {
+            store.persist(owner, floors)?;
+        }
+        Ok(())
     }
     pub fn with_catalog_sink(mut self, sink: Arc<dyn GatewayCatalogSink>) -> Self {
         self.publisher = Some(sink);
@@ -282,22 +322,30 @@ impl GatewayRouter {
             .routes
             .iter_mut()
             .find(|r| r.lease.resource == lease.resource)
+            && route.lease != lease
         {
-            if route.lease != lease {
+            ensure!(
+                lease.observed_at_unix_s > route.lease.observed_at_unix_s,
+                "stale or conflicting gateway renewal"
+            );
+            if lease.generation == route.lease.generation {
                 ensure!(
-                    lease.observed_at_unix_s > route.lease.observed_at_unix_s,
-                    "stale or conflicting gateway renewal"
+                    lease.endpoint.endpoints == route.lease.endpoint.endpoints
+                        && lease.endpoint.iroh_endpoints == route.lease.endpoint.iroh_endpoints
+                        && lease.operations == route.lease.operations
+                        && lease.native_security == route.lease.native_security,
+                    "changed resource requires a new generation"
                 );
-                if lease.generation == route.lease.generation {
-                    ensure!(
-                        lease.endpoint.endpoints == route.lease.endpoint.endpoints
-                            && lease.endpoint.iroh_endpoints == route.lease.endpoint.iroh_endpoints
-                            && lease.operations == route.lease.operations
-                            && lease.native_security == route.lease.native_security,
-                        "changed resource requires a new generation"
-                    );
-                }
             }
+        }
+        let mut next_floors = floors.clone();
+        next_floors.insert(lease.resource.clone(), lease.generation);
+        self.persist_generations(&config.gateway_peer_id, &next_floors)?;
+        if let Some(route) = config
+            .routes
+            .iter_mut()
+            .find(|r| r.lease.resource == lease.resource)
+        {
             route.lease = lease.clone();
         } else {
             config.routes.push(LocalRoute {
@@ -305,7 +353,7 @@ impl GatewayRouter {
                 backend_producer: source.into(),
             });
         }
-        floors.insert(lease.resource.clone(), lease.generation);
+        *floors = next_floors;
         self.registered
             .write()
             .map_err(|_| anyhow::anyhow!("gateway registrations unavailable"))?
@@ -337,10 +385,14 @@ impl GatewayRouter {
             .generation
             .checked_add(1)
             .context("resource generation exhausted")?;
-        self.floors
+        let mut floors = self
+            .floors
             .lock()
-            .map_err(|_| anyhow::anyhow!("gateway generations unavailable"))?
-            .insert(release.resource.clone(), next);
+            .map_err(|_| anyhow::anyhow!("gateway generations unavailable"))?;
+        let mut next_floors = floors.clone();
+        next_floors.insert(release.resource.clone(), next);
+        self.persist_generations(&config.gateway_peer_id, &next_floors)?;
+        *floors = next_floors;
         config
             .routes
             .retain(|r| r.lease.resource != release.resource);
@@ -348,6 +400,7 @@ impl GatewayRouter {
             .write()
             .map_err(|_| anyhow::anyhow!("gateway registrations unavailable"))?
             .remove(&release.resource);
+        drop(floors);
         drop(config);
         self.publish_catalog(now)
     }
@@ -588,6 +641,85 @@ mod tests {
             operation: "canvas.control".into(),
             input: serde_json::json!({"action":"list"}),
         }
+    }
+    #[test]
+    fn durable_release_cannot_resurrect_from_startup_config() {
+        let directory = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+        let path = directory.path().join("generations.json");
+        let lease = configuration(100).routes[0].lease.clone();
+        let router = GatewayRouter::new(configuration(100), 100)
+            .unwrap()
+            .with_generation_store(Arc::new(
+                generations::GenerationFile::open(path.clone()).unwrap(),
+            ))
+            .unwrap();
+        router.register("canvas", lease.clone(), 100).unwrap();
+        router
+            .release(
+                "canvas",
+                GatewayRelease {
+                    resource: lease.resource.clone(),
+                    generation: 1,
+                },
+                100,
+            )
+            .unwrap();
+        drop(router);
+        let router = GatewayRouter::new(configuration(100), 100)
+            .unwrap()
+            .with_generation_store(Arc::new(generations::GenerationFile::open(path).unwrap()))
+            .unwrap();
+        assert!(router.config.read().unwrap().routes.is_empty());
+        assert!(router.register("canvas", lease.clone(), 100).is_err());
+        let mut rebound = lease;
+        rebound.generation = 2;
+        router.register("canvas", rebound, 100).unwrap();
+        assert_eq!(router.active_leases(100).unwrap().len(), 1);
+    }
+    #[test]
+    fn failed_persistence_cannot_acknowledge_a_generation_change() {
+        struct BrokenStore;
+        impl GenerationStore for BrokenStore {
+            fn load(&self, _: &str) -> Result<BTreeMap<ResourceId, u64>> {
+                Ok(BTreeMap::new())
+            }
+            fn persist(&self, _: &str, _: &BTreeMap<ResourceId, u64>) -> Result<()> {
+                anyhow::bail!("storage unavailable")
+            }
+        }
+        assert!(
+            GatewayRouter::new(configuration(100), 100)
+                .unwrap()
+                .with_generation_store(Arc::new(BrokenStore))
+                .is_err()
+        );
+        let mut router = GatewayRouter::new(configuration(100), 100).unwrap();
+        router.generation_store = Some(Arc::new(BrokenStore));
+        let mut lease = configuration(100).routes[0].lease.clone();
+        lease.generation = 2;
+        lease.observed_at_unix_s = 101;
+        assert!(router.register("canvas", lease.clone(), 101).is_err());
+        assert_eq!(router.config.read().unwrap().routes[0].lease.generation, 1);
+        assert_eq!(router.floors.lock().unwrap()[&lease.resource], 1);
+        assert!(
+            router
+                .release(
+                    "canvas",
+                    GatewayRelease {
+                        resource: lease.resource,
+                        generation: 1
+                    },
+                    101
+                )
+                .is_err()
+        );
+        assert_eq!(router.config.read().unwrap().routes.len(), 1);
     }
     #[test]
     fn renewal_release_and_rebinding_do_not_create_permissions() {

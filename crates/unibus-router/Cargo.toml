@@ -8,7 +8,7 @@ description = "Hub daemon for the household bus: registry, grants, and QoS-aware
 
 [features]
 default = []
-owner-catalog = ["dep:fpl-resource-observation", "dep:sha2", "dep:tempfile"]
+owner-catalog = ["dep:fpl-resource-observation", "dep:sha2"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -26,7 +26,7 @@ unibus = { workspace = true }
 unibus-quic = { workspace = true }
 fpl-resource-observation = { git = "https://github.com/ajmwagar/mycelium.git", rev = "83a8cf8a818c29db84845eba8128477f38ab39ca", optional = true }
 sha2 = { workspace = true, optional = true }
-tempfile = { workspace = true, optional = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
 unibus-canvas = { path = "../unibus-canvas" }

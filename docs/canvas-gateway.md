@@ -58,7 +58,8 @@ Adapter config shape (lease is the exact shared `GatewayLease` from the router):
 
 This is a finite-lease pilot, not an indefinitely running deployment: no automatic
 ACL renewal, reconnect, background privilege issuance or production installation
-is implied. Durable generation floors, managed policy refresh, DCP revision-bound
+is implied. Enable router `UNIBUS_GATEWAY_STATE` for durable generation floors.
+Managed policy refresh, DCP revision-bound
 action discovery and cross-host mTLS/Iroh qualification remain separate work.
 
 ## Verification

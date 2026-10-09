@@ -29,9 +29,10 @@ fn main() -> Result<()> {
     let config = HubConfig::read(std::path::Path::new(&path))?;
     let mut hub = Hub::new(config)?;
     anyhow::ensure!(
-        std::env::var_os("UNIBUS_GATEWAY_CATALOG").is_none()
+        (std::env::var_os("UNIBUS_GATEWAY_CATALOG").is_none()
+            && std::env::var_os("UNIBUS_GATEWAY_STATE").is_none())
             || std::env::var_os("UNIBUS_GATEWAY_CONFIG").is_some(),
-        "gateway catalog requires explicit gateway configuration"
+        "gateway catalog/state requires explicit gateway configuration"
     );
     if let Some(path) = std::env::var_os("UNIBUS_GATEWAY_CONFIG") {
         let file = std::fs::File::open(path)?;
@@ -43,6 +44,11 @@ fn main() -> Result<()> {
         #[allow(unused_mut)]
         let mut gateway =
             unibus_router::gateway::GatewayRouter::new(gateway, unibus::envelope::now_ms() / 1000)?;
+        if let Some(path) = std::env::var_os("UNIBUS_GATEWAY_STATE") {
+            gateway = gateway.with_generation_store(Arc::new(
+                unibus_router::gateway::generations::GenerationFile::open(path.into())?,
+            ))?;
+        }
         if let Some(path) = std::env::var_os("UNIBUS_GATEWAY_CATALOG") {
             #[cfg(feature = "owner-catalog")]
             {

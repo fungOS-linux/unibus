@@ -107,8 +107,8 @@ changes require a newer generation; changed renewals require a newer observation
 
 Publish `unibus.gateway.release.v1` with `{"resource": <ResourceId>, "generation": N}`
 to release the current generation. A lower generation cannot resurrect it within
-this router process. Generation floors are currently in-memory, not durable across
-restart. Static route invocation remains compatible, but only explicitly registered
+this router process. Optional durable floors also prevent restart resurrection;
+see below. Static route invocation remains compatible, but only explicitly registered
 leases are exported as live observations.
 
 Build with `--features owner-catalog` and set `UNIBUS_GATEWAY_CATALOG` to an explicit
@@ -129,6 +129,26 @@ A release removes the local route immediately. Previously gossiped observations
 may remain until their original TTL expires; clearing the file is not a distributed
 revocation mechanism. Policy renewal/revocation is not yet dynamic. No live service
 restart/deployment or production mTLS/Iroh gateway qualification has been performed.
+
+## Durable generation floors
+
+Set `UNIBUS_GATEWAY_STATE` to an absolute state-file path in an existing owner-private
+directory (mode 0700 on Unix). The router holds an exclusive OS lock for its lifetime,
+rejects symlinks/unsafe file permissions and validates the bounded schema and owner.
+Atomic state replacement is synced before registration/release changes are applied
+or acknowledged. A storage failure rejects the operation without changing live
+routes. Startup merges persisted floors monotonically and suppresses retired routes
+even if the operator's initial config still contains them. Adapter re-registration
+at a new generation is required; availability itself is not persisted.
+
+Retired resource floors are retained even if a resource leaves the config, with a
+128-resource bound. Removing/resetting this file deliberately removes rollback
+protection; preserve it in backup/restore and don't run competing routers against
+different state files for the same owner. This is crash durability, not protection
+against an administrator restoring an older disk snapshot. A missing state file
+initializes a new store. Without the variable, legacy in-memory behavior remains.
+It does not provide durable request idempotency, policy revision tracking, or ACL
+renewal. Those remain separate from adapter lease renewal.
 
 ## Verification
 
