@@ -18,6 +18,40 @@ fn document(reply: &Value) -> Option<&Value> {
         .or_else(|| reply.get("data"))
         .filter(|d| !d.is_null())
 }
+async fn canonicalize(config: &Config, input: &Value, name: &str) -> Result<Value> {
+    validate(input, name)?;
+    let Some(codec) = &config.document_codec else {
+        return Ok(input.clone());
+    };
+    ensure!(
+        codec.is_absolute(),
+        "document_codec must be an explicit absolute operator path"
+    );
+    let args = vec!["normalize".to_owned()];
+    let args = &args;
+    let normalize = |document: Value| async move {
+        let request = json!({"schema_version":1,"request_id":unibus::envelope::next_request_id(),"document":document});
+        let reply =
+            crate::run_cli(codec, args, &request, std::time::Duration::from_secs(3)).await?;
+        let normalized = self::document(&reply)
+            .ok_or_else(|| anyhow::anyhow!("owner codec returned no workspace document"))?
+            .clone();
+        validate(&normalized, name)?;
+        ensure!(
+            normalized["id"] == input["id"]
+                && normalized["project_id"] == input["project_id"]
+                && normalized["revision"] == input["revision"],
+            "owner codec changed document identity or generation"
+        );
+        Ok::<Value, anyhow::Error>(normalized)
+    };
+    let normalized = normalize(input.clone()).await?;
+    ensure!(
+        normalize(normalized.clone()).await? == normalized,
+        "owner codec canonicalization is not idempotent"
+    );
+    Ok(normalized)
+}
 fn validate(document: &Value, name: &str) -> Result<u64> {
     ensure!(
         serde_json::to_vec(document)?.len() <= 48 * 1024,
@@ -136,7 +170,7 @@ pub async fn sync(
     let source_document = document(&reply)
         .ok_or_else(|| anyhow::anyhow!("source returned no workspace document"))?
         .clone();
-    validate(&source_document, name)?;
+    let source_document = canonicalize(config, &source_document, name).await?;
     let mut tasks = tokio::task::JoinSet::new();
     ensure!(targets.len() <= 32, "oversized target selection");
     let mut results = Vec::new();
@@ -218,8 +252,8 @@ async fn sync_target(
         let reply = success(target_read)?;
         let existing =
             document(&reply).ok_or_else(|| anyhow::anyhow!("target returned no document"))?;
-        validate(existing, name)?;
-        if compare(source, existing)? && (!activate || current == name) {
+        let existing = canonicalize(config, existing, name).await?;
+        if compare(source, &existing)? && (!activate || current == name) {
             return Ok("unchanged");
         }
     }
@@ -236,8 +270,11 @@ async fn sync_target(
         )
         .await?,
     )?;
+    let verified_document =
+        document(&verification).ok_or_else(|| anyhow::anyhow!("read-back returned no document"))?;
+    let verified_document = canonicalize(config, verified_document, name).await?;
     ensure!(
-        document(&verification) == Some(source),
+        &verified_document == source,
         "read-back document differs; import not verified"
     );
     let selected = success(
@@ -404,5 +441,55 @@ mod tests {
             assert!(!results[0].ok);
             assert!(!results[0].error.as_ref().unwrap().contains("97"));
         }
+    }
+    #[tokio::test]
+    async fn codec_is_optional_and_failure_never_becomes_a_document() {
+        let doc = json!({"schema_version":1,"id":"home-document","project_id":"home","revision":4,"bounds":[0.02],"future_owner_field":true});
+        let mut config = fixture(doc.clone(), Some("other"), true);
+        assert_eq!(canonicalize(&config, &doc, "home").await.unwrap(), doc);
+        config.document_codec = Some("relative-codec".into());
+        assert!(
+            canonicalize(&config, &doc, "home")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("absolute")
+        );
+        config.document_codec = Some("/usr/bin/false".into());
+        assert!(canonicalize(&config, &doc, "home").await.is_err());
+        assert!(
+            sync(&config, "source", "home", &["target".into()], false, false)
+                .await
+                .is_err()
+        );
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn owner_codec_receives_correlated_request_and_normalize_argument() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!(
+            "canvas-codec-test-{}",
+            unibus::envelope::next_request_id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let codec = directory.join("codec");
+        // Test-only subprocess, never an operational document schema implementation.
+        std::fs::write(&codec, r##"#!/bin/sh
+[ "$1" = normalize ] || exit 95
+read -r request
+case "$request" in *'"schema_version":1'*) ;; *) exit 94 ;; esac
+id=$(printf '%s' "$request" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+[ -n "$id" ] || exit 93
+printf '{"schema_version":1,"request_id":"%s","revision":4,"outcome":{"status":"ok","receipt":{"kind":"workspace_document","document":{"schema_version":1,"id":"home-document","project_id":"home","revision":4,"bounds":[0.019999999552965164],"future_owner_field":true}}}}\n' "$id"
+"##).unwrap();
+        std::fs::set_permissions(&codec, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let doc = json!({"schema_version":1,"id":"home-document","project_id":"home","revision":4,"bounds":[0.02],"future_owner_field":true});
+        let mut config = fixture(doc.clone(), Some("other"), true);
+        config.document_codec = Some(codec.clone());
+        let normalized = canonicalize(&config, &doc, "home").await.unwrap();
+        assert_eq!(normalized["bounds"][0], 0.019999999552965164);
+        assert_eq!(normalized["future_owner_field"], true);
+        std::fs::remove_file(codec).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 }

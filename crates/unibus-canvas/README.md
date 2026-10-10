@@ -65,3 +65,13 @@ widget/layout semantics. Source URLs and local data references are not copied
 or rewritten, so destinations still need access to referenced streams/assets.
 Gateway read/import is intentionally refused until its adapter advertises
 those operations; existing inspection/switch leases are not broadened.
+
+For heterogeneous Canvas JSON codecs (for example Android float encoding),
+optionally set `"document_codec":"/absolute/path/to/canvas-workspace-ctl"` in
+the fleet config. Deploy Canvas's independently-built owner codec on the caller.
+The controller invokes `normalize` with a bounded, correlated schema-v1 request,
+canonicalizes source/existing/read-back through Canvas's own typed model, verifies
+identity/generation retention and normalization idempotence, then compares exact
+JSON. Without this option comparison remains strict and unchanged. Unibus never
+duplicates the workspace schema or applies approximate float tolerance. Codec
+failure aborts source sync before writes; no alternate decoder is substituted.

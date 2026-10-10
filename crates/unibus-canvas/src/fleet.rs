@@ -21,6 +21,9 @@ pub struct Config {
     pub groups: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub unibus: Option<ClientConfig>,
+    /// Optional Canvas-owned typed document codec; never a Unibus schema copy.
+    #[serde(default)]
+    pub document_codec: Option<PathBuf>,
 }
 #[derive(Clone, Deserialize)]
 #[serde(tag = "driver", rename_all = "snake_case", deny_unknown_fields)]
