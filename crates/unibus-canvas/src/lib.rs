@@ -9,6 +9,7 @@ use unibus::gateway::{GatewayInvoke, ResourceId};
 
 pub const INSPECT: &str = "canvas.inspect";
 pub const SWITCH: &str = "canvas.workspace.switch";
+pub mod fleet;
 const MAX_REPLY: u64 = 60 * 1024;
 
 #[derive(Clone, Deserialize)]
@@ -70,54 +71,69 @@ impl CanvasAdapter {
     }
     pub async fn execute(&self, invocation: &GatewayInvoke) -> Result<Value> {
         let request = self.request(invocation)?;
-        let mut bytes = serde_json::to_vec(&request)?;
-        bytes.push(b'\n');
-        let mut child = tokio::process::Command::new(&self.canvasctl)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()?;
-        let result = tokio::time::timeout(Duration::from_secs(3), async {
-            let mut stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("missing CLI stdin"))?;
-            stdin.write_all(&bytes).await?;
-            drop(stdin);
-            let mut stdout = child
-                .stdout
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("missing CLI stdout"))?
-                .take(MAX_REPLY + 1);
-            let mut reply = Vec::new();
-            stdout.read_to_end(&mut reply).await?;
-            ensure!(
-                reply.len() as u64 <= MAX_REPLY,
-                "Canvas reply exceeds gateway bound"
-            );
-            ensure!(child.wait().await?.success(), "canvasctl failed");
-            let reply: Value = serde_json::from_slice(&reply)?;
-            ensure!(
-                reply["schema_version"] == 1 && reply["request_id"] == invocation.request_id,
-                "uncorrelated Canvas reply"
-            );
-            ensure!(
-                matches!(reply["outcome"]["status"].as_str(), Some("ok" | "error")),
-                "invalid Canvas outcome"
-            );
-            Ok(reply)
-        })
-        .await;
-        match result {
-            Ok(Ok(reply)) => Ok(reply),
-            failed => {
-                let _ = child.kill().await;
-                match failed {
-                    Ok(Err(error)) => Err(error),
-                    Err(_) => anyhow::bail!("Canvas control deadline exceeded"),
-                    _ => unreachable!(),
-                }
+        run_cli(&self.canvasctl, &[], &request, Duration::from_secs(3)).await
+    }
+}
+pub async fn run_cli(
+    program: &std::path::Path,
+    args: &[String],
+    request: &Value,
+    deadline: Duration,
+) -> Result<Value> {
+    ensure!(program.is_absolute(), "control executable must be absolute");
+    let mut bytes = serde_json::to_vec(&request)?;
+    bytes.push(b'\n');
+    ensure!(
+        bytes.len() <= MAX_REPLY as usize,
+        "control request exceeds bound"
+    );
+    let mut child = tokio::process::Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let result = tokio::time::timeout(deadline, async {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("missing CLI stdin"))?;
+        stdin.write_all(&bytes).await?;
+        drop(stdin);
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("missing CLI stdout"))?
+            .take(MAX_REPLY + 1);
+        let mut reply = Vec::new();
+        stdout.read_to_end(&mut reply).await?;
+        ensure!(
+            reply.len() as u64 <= MAX_REPLY,
+            "Canvas reply exceeds gateway bound"
+        );
+        ensure!(child.wait().await?.success(), "canvasctl failed");
+        let reply: Value = serde_json::from_slice(&reply)?;
+        ensure!(
+            reply["schema_version"] == 1 && reply["request_id"] == request["request_id"],
+            "uncorrelated Canvas reply"
+        );
+        ensure!(
+            matches!(reply["outcome"]["status"].as_str(), Some("ok" | "error"))
+                || reply["ok"].is_boolean(),
+            "invalid Canvas outcome"
+        );
+        Ok(reply)
+    })
+    .await;
+    match result {
+        Ok(Ok(reply)) => Ok(reply),
+        failed => {
+            let _ = child.kill().await;
+            match failed {
+                Ok(Err(error)) => Err(error),
+                Err(_) => anyhow::bail!("Canvas control deadline exceeded"),
+                _ => unreachable!(),
             }
         }
     }
@@ -182,14 +198,8 @@ mod tests {
                 .to_string()
                 .contains("bound")
         );
-        adapter.canvasctl = "/usr/bin/cat".into();
-        assert!(
-            adapter
-                .execute(&invocation)
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("outcome")
-        );
+        adapter.canvasctl = "/bin/cat".into();
+        let error = adapter.execute(&invocation).await.unwrap_err().to_string();
+        assert!(error.contains("outcome"), "unexpected rejection: {error}");
     }
 }
