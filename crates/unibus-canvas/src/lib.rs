@@ -80,6 +80,72 @@ pub async fn run_cli(
     request: &Value,
     deadline: Duration,
 ) -> Result<Value> {
+    run_cli_contract(
+        program,
+        args,
+        request,
+        deadline,
+        CliReplyContract::Correlated,
+    )
+    .await
+}
+
+/// Operator-selected owner CLI contract, never chosen by gateway callers.
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CliReplyContract {
+    #[default]
+    Correlated,
+    /// One request/receipt per authenticated presentation connection.
+    /// This does not provide wire-level request-ID correlation.
+    PresentationTransaction,
+}
+
+fn validate_cli_reply(
+    mut reply: Value,
+    request: &Value,
+    contract: CliReplyContract,
+) -> Result<Value> {
+    match contract {
+        CliReplyContract::Correlated => ensure!(
+            reply["schema_version"] == 1 && reply["request_id"] == request["request_id"],
+            "uncorrelated Canvas reply"
+        ),
+        CliReplyContract::PresentationTransaction => {
+            ensure!(
+                reply.is_object() && reply["ok"].is_boolean() && reply["revision"].is_u64(),
+                "invalid presentation transaction receipt"
+            );
+            if let Some(version) = reply.get("schema_version") {
+                ensure!(version == 1, "conflicting presentation schema version");
+            }
+            if let Some(id) = reply.get("request_id") {
+                ensure!(
+                    id == &request["request_id"],
+                    "conflicting presentation request ID"
+                );
+            }
+            // Mark the local normalization explicitly; do not claim wire correlation.
+            reply["schema_version"] = json!(1);
+            reply["request_id"] = request["request_id"].clone();
+            reply["reply_provenance"] = json!("single_authenticated_transaction");
+        }
+    }
+    ensure!(
+        matches!(reply["outcome"]["status"].as_str(), Some("ok" | "error"))
+            || reply["ok"].is_boolean(),
+        "invalid Canvas outcome"
+    );
+    Ok(reply)
+}
+
+pub async fn run_cli_contract(
+    program: &std::path::Path,
+    args: &[String],
+    request: &Value,
+    deadline: Duration,
+    contract: CliReplyContract,
+) -> Result<Value> {
     ensure!(program.is_absolute(), "control executable must be absolute");
     let mut bytes = serde_json::to_vec(&request)?;
     bytes.push(b'\n');
@@ -113,17 +179,7 @@ pub async fn run_cli(
             "Canvas reply exceeds gateway bound"
         );
         ensure!(child.wait().await?.success(), "canvasctl failed");
-        let reply: Value = serde_json::from_slice(&reply)?;
-        ensure!(
-            reply["schema_version"] == 1 && reply["request_id"] == request["request_id"],
-            "uncorrelated Canvas reply"
-        );
-        ensure!(
-            matches!(reply["outcome"]["status"].as_str(), Some("ok" | "error"))
-                || reply["ok"].is_boolean(),
-            "invalid Canvas outcome"
-        );
-        Ok(reply)
+        validate_cli_reply(serde_json::from_slice(&reply)?, request, contract)
     })
     .await;
     match result {
@@ -142,6 +198,43 @@ pub async fn run_cli(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn presentation_normalization_is_explicit_and_rejects_conflicts() {
+        let request = json!({"schema_version":1,"request_id":"check-1"});
+        let receipt = json!({"ok":true,"revision":7,"data":{}});
+        assert!(
+            validate_cli_reply(receipt.clone(), &request, CliReplyContract::Correlated).is_err()
+        );
+        let normalized = validate_cli_reply(
+            receipt.clone(),
+            &request,
+            CliReplyContract::PresentationTransaction,
+        )
+        .unwrap();
+        assert_eq!(normalized["request_id"], "check-1");
+        assert_eq!(
+            normalized["reply_provenance"],
+            "single_authenticated_transaction"
+        );
+        for bad in [
+            json!({"ok":true}),
+            json!({"ok":"true","revision":7}),
+            json!({"ok":true,"revision":7,"request_id":"other"}),
+            json!({"ok":true,"revision":7,"schema_version":2}),
+        ] {
+            assert!(
+                validate_cli_reply(bad, &request, CliReplyContract::PresentationTransaction)
+                    .is_err()
+            );
+        }
+        let rejected = validate_cli_reply(
+            json!({"ok":false,"revision":7}),
+            &request,
+            CliReplyContract::PresentationTransaction,
+        )
+        .unwrap();
+        assert_eq!(rejected["ok"], false);
+    }
     fn fixture() -> (CanvasAdapter, GatewayInvoke) {
         let resource: ResourceId =
             serde_json::from_value(json!({"scope":{"kind":"peer","id":"home-pi"},"key":"canvas"}))

@@ -29,6 +29,8 @@ pub enum Driver {
         program: PathBuf,
         #[serde(default)]
         args: Vec<String>,
+        #[serde(default)]
+        reply_contract: super::CliReplyContract,
     },
     Gateway {
         lease: Box<GatewayLease>,
@@ -92,11 +94,16 @@ pub fn endpoint_status(receipt: &Receipt) -> EndpointStatus {
             .pointer("/outcome/receipt/snapshot")
             .or_else(|| reply.get("data"))
     });
+    let document = snapshot.and_then(|s| s.get("document"));
+    let state = document.or(snapshot);
     EndpointStatus {
         endpoint: receipt.target.clone(),
         ok: receipt.ok,
-        workspace: snapshot
-            .and_then(|s| s.get("workspace_id"))
+        workspace: state
+            .and_then(|s| {
+                s.get("workspace_id")
+                    .or_else(|| document.and_then(|d| d.get("id")))
+            })
             .and_then(Value::as_str)
             .map(str::to_owned),
         revision: receipt
@@ -104,7 +111,7 @@ pub fn endpoint_status(receipt: &Receipt) -> EndpointStatus {
             .as_ref()
             .and_then(|r| r.get("revision"))
             .and_then(Value::as_u64),
-        windows: snapshot
+        windows: state
             .and_then(|s| s.get("surfaces"))
             .and_then(Value::as_array)
             .cloned(),
@@ -137,7 +144,10 @@ pub fn format_status(status: &EndpointStatus) -> String {
                     "\n  {} — {} [{}]",
                     window["id"].as_str().unwrap_or("unknown"),
                     window["title"].as_str().unwrap_or("untitled"),
-                    window["content"].as_str().unwrap_or("unknown")
+                    window["content"]
+                        .as_str()
+                        .or_else(|| window["content"]["kind"].as_str())
+                        .unwrap_or("unknown")
                 ));
             }
         }
@@ -202,13 +212,17 @@ impl Config {
             };
             let name = name.clone();
             match driver {
-                Driver::Command { program, args } => {
+                Driver::Command {
+                    program,
+                    args,
+                    reply_contract,
+                } => {
                     let action = action.clone();
                     tasks.spawn(async move {
                         let result = async {
                             ensure!(args.len() <= 32, "driver argument count exceeds bound");
                             let request = json!({"schema_version":1,"request_id":unibus::envelope::next_request_id(),"expected_revision":action.revision(&name)?,"command":action.command(&name)?});
-                            super::run_cli(&program,&args,&request,Duration::from_secs(12)).await
+                            super::run_cli_contract(&program,&args,&request,Duration::from_secs(12),reply_contract).await
                         }.await;
                         vec![receipt(name,result)]
                     });
@@ -407,6 +421,22 @@ mod tests {
         assert_eq!(status.workspace.as_deref(), Some("studio"));
         assert!(status.windows.is_none());
         assert!(format_status(&status).contains("unavailable"));
+    }
+    #[test]
+    fn status_projects_tv_document_and_uses_endpoint_revision() {
+        let status = endpoint_status(&Receipt {
+            target: "firetv".into(),
+            ok: true,
+            error: None,
+            reply: Some(json!({"ok":true,"revision":3891,"data":{"document":{
+                "id":"tv-taig-four-axis","revision":20,"surfaces":[{
+                    "id":"replay","title":"Machining","content":{"kind":"stream","url":"http://example.test/video.m3u8"}
+                }]
+            }}})),
+        });
+        assert_eq!(status.workspace.as_deref(), Some("tv-taig-four-axis"));
+        assert_eq!(status.revision, Some(3891));
+        assert!(format_status(&status).contains("replay — Machining [stream]"));
     }
     #[tokio::test]
     async fn failed_screen_does_not_hide_other_receipts() {
