@@ -41,3 +41,27 @@ document revision.
 
 Registration currently means the local target config;
 automatic Mycelium catalog ingestion and live Iroh qualification are separate.
+
+## Explicit workspace sync
+
+```sh
+canvas-fleet sync neo project-dashboard studio,firetv --dry-run
+canvas-fleet sync neo project-dashboard studio,firetv
+canvas-fleet sync neo project-dashboard all --activate
+```
+
+Sync reads one named owner document and concurrently imports it into the
+selected endpoints. The source is excluded from the destination group. It does
+not replace catalogs or switch the source. Without `--activate`, each target
+keeps its selection (including an already-active imported project). Equal
+documents are skipped; newer target revisions and equal-revision differences
+are conflicts, never rebased. Every write binds the preflight endpoint revision,
+is not retried, and is followed by exact owner-document read-back verification.
+An endpoint failure does not hide other endpoint results; partial success is
+not rolled back. `--dry-run` performs reads and conflict checks but no writes.
+
+Documents are opaque bounded JSON (48 KiB maximum); Canvas alone validates
+widget/layout semantics. Source URLs and local data references are not copied
+or rewritten, so destinations still need access to referenced streams/assets.
+Gateway read/import is intentionally refused until its adapter advertises
+those operations; existing inspection/switch leases are not broadened.

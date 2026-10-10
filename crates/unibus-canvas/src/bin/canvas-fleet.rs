@@ -3,6 +3,15 @@ use unibus_canvas::fleet::{Action, Config, endpoint_status, format_status};
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--help" || a == "-h") {
+        println!(
+            "canvas-fleet status [GROUP_OR_TARGETS] [--json] [--config PATH]\ncanvas-fleet sync SOURCE WORKSPACE TARGETS [--activate] [--dry-run] [--config PATH]\ncanvas-fleet CONFIG GROUP_OR_TARGETS inspect\ncanvas-fleet CONFIG GROUP_OR_TARGETS switch WORKSPACE"
+        );
+        return Ok(());
+    }
+    if args.first().is_some_and(|a| a == "sync") {
+        return sync(&args[1..]).await;
+    }
     if args.first().is_some_and(|a| a == "status") {
         return status(&args[1..]).await;
     }
@@ -10,15 +19,7 @@ async fn main() -> Result<()> {
         (args.len() == 3 && args[2] == "inspect") || (args.len() == 4 && args[2] == "switch"),
         "usage: canvas-fleet CONFIG GROUP_OR_TARGETS inspect | switch WORKSPACE"
     );
-    let file = std::fs::File::open(&args[0])?;
-    ensure!(
-        file.metadata()?.len() <= 65536,
-        "fleet config exceeds bound"
-    );
-    let mut config: Config = serde_json::from_reader(file)?;
-    if let Some(bus) = config.unibus.as_mut() {
-        bus.resolve_token_file(std::path::Path::new(&args[0]));
-    }
+    let config = load_config(Some(&args[0]))?;
     let targets = config.select(&args[1])?;
     let results = if args[2] == "inspect" {
         config.run(&targets, Action::Inspect).await
@@ -63,6 +64,64 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn load_config(path: Option<&str>) -> Result<Config> {
+    let path = match path {
+        Some(path) => std::path::PathBuf::from(path),
+        None => std::env::var_os("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
+            })
+            .ok_or_else(|| anyhow::anyhow!("no config directory; supply --config"))?
+            .join("unibus/canvas-fleet.json"),
+    };
+    let file = std::fs::File::open(&path)?;
+    ensure!(
+        file.metadata()?.len() <= 65536,
+        "fleet config exceeds bound"
+    );
+    let mut config: Config = serde_json::from_reader(file)?;
+    if let Some(bus) = config.unibus.as_mut() {
+        bus.resolve_token_file(&path);
+    }
+    Ok(config)
+}
+
+async fn sync(args: &[String]) -> Result<()> {
+    ensure!(
+        args.len() >= 3,
+        "usage: canvas-fleet sync SOURCE WORKSPACE TARGETS [--activate] [--dry-run] [--config PATH]"
+    );
+    let mut activate = false;
+    let mut dry_run = false;
+    let mut path = None;
+    let mut flags = args[3..].iter();
+    while let Some(flag) = flags.next() {
+        match flag.as_str() {
+            "--activate" => activate = true,
+            "--dry-run" => dry_run = true,
+            "--config" => {
+                path = Some(
+                    flags
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("--config requires a path"))?
+                        .as_str(),
+                )
+            }
+            _ => anyhow::bail!("unknown sync option {flag}"),
+        }
+    }
+    let config = load_config(path)?;
+    let targets = config.select(&args[2])?;
+    let results =
+        unibus_canvas::sync::sync(&config, &args[0], &args[1], &targets, activate, dry_run).await?;
+    println!("{}", serde_json::to_string_pretty(&results)?);
+    if results.iter().any(|r| !r.ok) {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 async fn status(args: &[String]) -> Result<()> {
     let mut selector = None;
     let mut json = false;
@@ -97,15 +156,7 @@ async fn status(args: &[String]) -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("no config directory; supply --config"))?
             .join("unibus/canvas-fleet.json"),
     };
-    let file = std::fs::File::open(&path)?;
-    ensure!(
-        file.metadata()?.len() <= 65536,
-        "fleet config exceeds bound"
-    );
-    let mut config: Config = serde_json::from_reader(file)?;
-    if let Some(bus) = config.unibus.as_mut() {
-        bus.resolve_token_file(&path);
-    }
+    let config = load_config(path.to_str())?;
     let targets = match selector {
         Some(selector) => config.select(&selector)?,
         None => {

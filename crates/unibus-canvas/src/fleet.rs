@@ -40,6 +40,11 @@ pub enum Driver {
 #[derive(Clone)]
 pub enum Action {
     Inspect,
+    /// Owner-local commands only; deliberately not translated into gateway ACLs.
+    Workspace {
+        command: Value,
+        revision: Option<u64>,
+    },
     Switch {
         name: String,
         revisions: BTreeMap<String, u64>,
@@ -49,6 +54,7 @@ impl Action {
     fn command(&self, _target: &str) -> Result<Value> {
         Ok(match self {
             Self::Inspect => json!({"command":"inspect"}),
+            Self::Workspace { command, .. } => command.clone(),
             Self::Switch { name, .. } => {
                 ensure!(
                     !name.is_empty() && name.len() <= 128 && !name.chars().any(char::is_control),
@@ -61,6 +67,7 @@ impl Action {
     fn revision(&self, target: &str) -> Result<Option<u64>> {
         match self {
             Self::Inspect => Ok(None),
+            Self::Workspace { revision, .. } => Ok(*revision),
             Self::Switch { revisions, .. } => {
                 Ok(Some(*revisions.get(target).ok_or_else(|| {
                     anyhow::anyhow!("missing target revision")
@@ -230,7 +237,20 @@ impl Config {
                 Driver::Gateway {
                     lease,
                     result_producer,
-                } => gateways.push((name, *lease, result_producer)),
+                } => {
+                    if matches!(action, Action::Workspace { .. }) {
+                        tasks.spawn(async move {
+                            vec![receipt(
+                                name,
+                                Err(anyhow::anyhow!(
+                                    "workspace read/import is not advertised by the gateway adapter"
+                                )),
+                            )]
+                        });
+                    } else {
+                        gateways.push((name, *lease, result_producer));
+                    }
+                }
             }
         }
         if !gateways.is_empty() {
@@ -282,6 +302,7 @@ fn gateway_batch(
             let operation = match action {
                 Action::Inspect => super::INSPECT,
                 Action::Switch { .. } => super::SWITCH,
+                Action::Workspace { .. } => anyhow::bail!("unsupported gateway operation"),
             };
             ensure!(
                 lease.operations.contains(operation),
@@ -289,6 +310,7 @@ fn gateway_batch(
             );
             let input = match &action {
                 Action::Inspect => json!({}),
+                Action::Workspace { .. } => anyhow::bail!("unsupported gateway operation"),
                 Action::Switch {
                     name: workspace, ..
                 } => json!({"name":workspace,"expected_revision":action.revision(&name)?}),

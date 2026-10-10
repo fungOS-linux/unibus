@@ -10,6 +10,7 @@ use unibus::gateway::{GatewayInvoke, ResourceId};
 pub const INSPECT: &str = "canvas.inspect";
 pub const SWITCH: &str = "canvas.workspace.switch";
 pub mod fleet;
+pub mod sync;
 const MAX_REPLY: u64 = 60 * 1024;
 
 #[derive(Clone, Deserialize)]
@@ -178,8 +179,19 @@ pub async fn run_cli_contract(
             reply.len() as u64 <= MAX_REPLY,
             "Canvas reply exceeds gateway bound"
         );
-        ensure!(child.wait().await?.success(), "canvasctl failed");
-        validate_cli_reply(serde_json::from_slice(&reply)?, request, contract)
+        let status = child.wait().await?;
+        let reply = match serde_json::from_slice(&reply) {
+            Ok(reply) => validate_cli_reply(reply, request, contract)?,
+            Err(_) if !status.success() => anyhow::bail!("canvasctl failed"),
+            Err(error) => return Err(error.into()),
+        };
+        // Owner CLIs may exit nonzero for a correctly framed rejection. Keep
+        // that receipt so callers can distinguish conflict from transport failure.
+        ensure!(
+            status.success() || reply["outcome"]["status"] == "error" || reply["ok"] == false,
+            "canvasctl failed despite a successful reply"
+        );
+        Ok(reply)
     })
     .await;
     match result {
@@ -278,6 +290,13 @@ mod tests {
         let (mut adapter, invocation) = fixture();
         adapter.canvasctl = "/usr/bin/false".into();
         assert!(adapter.execute(&invocation).await.is_err());
+    }
+    #[tokio::test]
+    async fn nonzero_owner_rejection_retains_correlated_reason() {
+        let reply = run_cli(std::path::Path::new("/bin/sh"),
+            &["-c".into(), "printf '%s\\n' '{\"schema_version\":1,\"request_id\":\"rejected\",\"revision\":2,\"outcome\":{\"status\":\"error\",\"message\":\"stale revision\"}}'; exit 1".into()],
+            &json!({"schema_version":1,"request_id":"rejected"}), Duration::from_secs(1)).await.unwrap();
+        assert_eq!(reply["outcome"]["message"], "stale revision");
     }
     #[tokio::test]
     async fn oversized_and_non_reply_output_are_rejected() {
