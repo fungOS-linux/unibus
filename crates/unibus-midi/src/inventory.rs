@@ -175,7 +175,7 @@ impl MidiInventoryRegistry {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(all(feature = "devices", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub fn enumerate(producer_id: &str, now_ms: u64, ttl_ms: u64) -> Result<MidiPortInventory> {
     let input = midir::MidiInput::new("unibus-midi-discovery-input")?;
     let output = midir::MidiOutput::new("unibus-midi-discovery-output")?;

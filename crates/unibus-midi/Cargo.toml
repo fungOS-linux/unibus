@@ -4,6 +4,20 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["devices"]
+devices = ["dep:midir"]
+
+[[bin]]
+name = "unibus-midi"
+path = "src/main.rs"
+required-features = ["devices"]
+
+[[bin]]
+name = "unibus-midi-discovery"
+path = "src/bin/unibus-midi-discovery.rs"
+required-features = ["devices"]
+
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
@@ -14,7 +28,7 @@ unibus.workspace = true
 sha2.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
-midir.workspace = true
+midir = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
