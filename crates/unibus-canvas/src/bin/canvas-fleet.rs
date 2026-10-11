@@ -5,7 +5,7 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| a == "--help" || a == "-h") {
         println!(
-            "canvas-fleet status [GROUP_OR_TARGETS] [--json] [--config PATH]\ncanvas-fleet sync SOURCE WORKSPACE TARGETS [--activate] [--dry-run] [--config PATH]\ncanvas-fleet CONFIG GROUP_OR_TARGETS inspect\ncanvas-fleet CONFIG GROUP_OR_TARGETS switch WORKSPACE"
+            "canvas-fleet status [GROUP_OR_TARGETS] [--json] [--config PATH]\ncanvas-fleet launch GROUP_OR_TARGETS [--config PATH]\ncanvas-fleet sync SOURCE WORKSPACE TARGETS [--activate] [--dry-run] [--config PATH]\ncanvas-fleet CONFIG GROUP_OR_TARGETS inspect\ncanvas-fleet CONFIG GROUP_OR_TARGETS switch WORKSPACE"
         );
         return Ok(());
     }
@@ -14,6 +14,9 @@ async fn main() -> Result<()> {
     }
     if args.first().is_some_and(|a| a == "status") {
         return status(&args[1..]).await;
+    }
+    if args.first().is_some_and(|a| a == "launch") {
+        return launch(&args[1..]).await;
     }
     ensure!(
         (args.len() == 3 && args[2] == "inspect") || (args.len() == 4 && args[2] == "switch"),
@@ -61,6 +64,22 @@ async fn main() -> Result<()> {
     if results.iter().any(|result| !result.ok) {
         std::process::exit(1)
     }
+    Ok(())
+}
+
+async fn launch(args: &[String]) -> Result<()> {
+    ensure!(
+        args.len() == 1 || (args.len() == 3 && args[1] == "--config"),
+        "usage: canvas-fleet launch GROUP_OR_TARGETS [--config PATH]"
+    );
+    let config = load_config(args.get(2).map(String::as_str))?;
+    let targets = config.select(&args[0])?;
+    let results = config.run(&targets, Action::Launch).await;
+    println!("{}", serde_json::to_string_pretty(&results)?);
+    ensure!(
+        results.iter().all(|r| r.ok),
+        "one or more endpoints failed to launch"
+    );
     Ok(())
 }
 

@@ -42,6 +42,8 @@ pub enum Driver {
 }
 #[derive(Clone)]
 pub enum Action {
+    /// Bring up the installed owner app; not an arbitrary application launcher.
+    Launch,
     Inspect,
     /// Owner-local commands only; deliberately not translated into gateway ACLs.
     Workspace {
@@ -56,6 +58,7 @@ pub enum Action {
 impl Action {
     fn command(&self, _target: &str) -> Result<Value> {
         Ok(match self {
+            Self::Launch => json!({"command":"launch"}),
             Self::Inspect => json!({"command":"inspect"}),
             Self::Workspace { command, .. } => command.clone(),
             Self::Switch { name, .. } => {
@@ -69,6 +72,7 @@ impl Action {
     }
     fn revision(&self, target: &str) -> Result<Option<u64>> {
         match self {
+            Self::Launch => Ok(None),
             Self::Inspect => Ok(None),
             Self::Workspace { revision, .. } => Ok(*revision),
             Self::Switch { revisions, .. } => {
@@ -232,7 +236,16 @@ impl Config {
                         let result = async {
                             ensure!(args.len() <= 32, "driver argument count exceeds bound");
                             let request = json!({"schema_version":1,"request_id":unibus::envelope::next_request_id(),"expected_revision":action.revision(&name)?,"command":action.command(&name)?});
-                            super::run_cli_contract(&program,&args,&request,Duration::from_secs(12),reply_contract).await
+                            let contract = if matches!(action, Action::Launch) {
+                                super::CliReplyContract::Correlated
+                            } else { reply_contract };
+                            let reply = super::run_cli_contract(&program,&args,&request,Duration::from_secs(12),contract).await?;
+                            if matches!(action, Action::Launch) && reply["outcome"]["status"] == "ok" {
+                                ensure!(reply["outcome"]["receipt"]["kind"] == "app_launched"
+                                    && reply["outcome"]["receipt"]["foreground"] == true,
+                                    "owner did not verify foreground launch");
+                            }
+                            Ok(reply)
                         }.await;
                         vec![receipt(name,result)]
                     });
@@ -241,12 +254,12 @@ impl Config {
                     lease,
                     result_producer,
                 } => {
-                    if matches!(action, Action::Workspace { .. }) {
+                    if matches!(action, Action::Workspace { .. } | Action::Launch) {
                         tasks.spawn(async move {
                             vec![receipt(
                                 name,
                                 Err(anyhow::anyhow!(
-                                    "workspace read/import is not advertised by the gateway adapter"
+                                    "owner-local operation is not advertised by the gateway adapter"
                                 )),
                             )]
                         });
@@ -305,7 +318,9 @@ fn gateway_batch(
             let operation = match action {
                 Action::Inspect => super::INSPECT,
                 Action::Switch { .. } => super::SWITCH,
-                Action::Workspace { .. } => anyhow::bail!("unsupported gateway operation"),
+                Action::Workspace { .. } | Action::Launch => {
+                    anyhow::bail!("unsupported gateway operation")
+                }
             };
             ensure!(
                 lease.operations.contains(operation),
@@ -313,7 +328,9 @@ fn gateway_batch(
             );
             let input = match &action {
                 Action::Inspect => json!({}),
-                Action::Workspace { .. } => anyhow::bail!("unsupported gateway operation"),
+                Action::Workspace { .. } | Action::Launch => {
+                    anyhow::bail!("unsupported gateway operation")
+                }
                 Action::Switch {
                     name: workspace, ..
                 } => json!({"name":workspace,"expected_revision":action.revision(&name)?}),
@@ -406,6 +423,26 @@ fn gateway_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn launch_is_narrow_and_does_not_bind_a_workspace_revision() {
+        assert_eq!(
+            Action::Launch.command("firetv").unwrap(),
+            json!({"command":"launch"})
+        );
+        assert_eq!(Action::Launch.revision("firetv").unwrap(), None);
+    }
+    #[tokio::test]
+    async fn unsupported_launch_remains_a_per_endpoint_error() {
+        let cfg: Config = serde_json::from_value(json!({"targets":{
+            "offline":{"driver":"command","program":"/usr/bin/false"},
+            "echo":{"driver":"command","program":"/bin/cat","reply_contract":"presentation_transaction"}
+        }})).unwrap();
+        let replies = cfg
+            .run(&cfg.select("offline,echo").unwrap(), Action::Launch)
+            .await;
+        assert_eq!(replies.len(), 2);
+        assert!(replies.iter().all(|r| !r.ok));
+    }
     #[test]
     fn selection_is_explicit_and_deduplicated() {
         let cfg:Config=serde_json::from_value(json!({"targets":{"neo":{"driver":"command","program":"/usr/bin/false"},"studio":{"driver":"command","program":"/usr/bin/false"}},"groups":{"all":["neo","studio","neo"]}})).unwrap();

@@ -42,6 +42,23 @@ document revision.
 Registration currently means the local target config;
 automatic Mycelium catalog ingestion and live Iroh qualification are separate.
 
+## Owner-local app launch
+
+```sh
+canvas-fleet launch firetv
+canvas-fleet launch firetv --config /absolute/path/to/canvas-fleet.json
+```
+
+An updated `canvas-tvctl` resolves Canvas's installed Android LEANBACK launcher,
+brings it forward without clearing data or force-stopping playback, and verifies
+the exact foreground component. No activity class is hard-coded. ADB must already
+be connected and authorized. Launch uses a correlated owner receipt, not a
+renderer revision, and is refused by Unibus gateway drivers. Other owner CLIs
+must explicitly implement this action; unsupported endpoints return errors.
+It cannot launch arbitrary apps or install an APK. The manual equivalent is
+package-manager launcher resolution, `am start -W --activity-single-top -n`, then
+`dumpsys window windows` focus verification.
+
 ## Explicit workspace sync
 
 ```sh
