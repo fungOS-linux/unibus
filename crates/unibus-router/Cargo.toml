@@ -10,7 +10,7 @@ description = "Hub daemon for the household bus: registry, grants, and QoS-aware
 default = []
 owner-catalog = ["dep:fpl-resource-observation", "dep:sha2"]
 managed-gateway = ["dep:unibus-mycelium"]
-viewer = ["dep:sha2", "dep:fpl-resource-observation"]
+viewer = ["dep:sha2", "dep:fpl-resource-observation", "dep:coherence-widget-contract"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -29,9 +29,18 @@ unibus-quic = { workspace = true }
 unibus-mycelium = { path = "../unibus-mycelium", optional = true }
 fpl-resource-observation = { git = "https://github.com/ajmwagar/mycelium.git", rev = "83a8cf8a818c29db84845eba8128477f38ab39ca", optional = true }
 sha2 = { workspace = true, optional = true }
+coherence-widget-contract = { path = "../../vendor/coherence-widget-contract", optional = true }
 tempfile = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
 unibus-canvas = { path = "../unibus-canvas" }
 tempfile = { workspace = true }
 rcgen = "0.14"
+
+[[bin]]
+name = "unibus-widget-source"
+path = "src/bin/unibus-widget-source.rs"
+required-features = ["viewer"]

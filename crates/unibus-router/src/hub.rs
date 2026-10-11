@@ -79,9 +79,31 @@ pub struct Hub {
     conns: Arc<Mutex<HashMap<String, Arc<dyn Sink>>>>,
     plugins: Arc<Vec<Arc<dyn HubPlugin>>>,
     verifier: Option<Arc<dyn unibus::OfflineVerifier>>,
+    #[cfg(feature = "viewer")]
+    widget_store: Arc<crate::viewer::widgets::Store>,
 }
 
 impl Hub {
+    #[cfg(feature = "viewer")]
+    pub fn configure_widgets(
+        &self,
+        definitions: &[crate::viewer::widgets::Definition],
+    ) -> Result<()> {
+        self.widget_store.configure(definitions)
+    }
+    #[cfg(feature = "viewer")]
+    pub fn viewer_widget(
+        &self,
+        principal: &str,
+        definition: &crate::viewer::widgets::Definition,
+    ) -> Result<Option<coherence_widget_contract::Snapshot>> {
+        let grant = self
+            .grants
+            .get(principal)
+            .context("viewer principal has no grant")?
+            .to_grant();
+        self.widget_store.get(definition, &grant)
+    }
     #[cfg(feature = "viewer")]
     pub fn viewer_snapshot(&self, producer_id: &str) -> Result<crate::viewer::Snapshot> {
         let grant = self
@@ -212,13 +234,20 @@ impl Hub {
             .iter()
             .map(|r| (r.kind.clone(), r.target.clone()))
             .collect();
+        #[cfg(feature = "viewer")]
+        let widget_store = Arc::new(crate::viewer::widgets::Store::default());
         Ok(Self {
             config: Arc::new(config),
             grants: Arc::new(grants),
             routes: Arc::new(routes),
             registry: Arc::new(Mutex::new(NodeRegistry::new())),
             conns: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(not(feature = "viewer"))]
             plugins: Arc::new(Vec::new()),
+            #[cfg(feature = "viewer")]
+            plugins: Arc::new(vec![widget_store.clone() as Arc<dyn HubPlugin>]),
+            #[cfg(feature = "viewer")]
+            widget_store,
             verifier: None,
         })
     }

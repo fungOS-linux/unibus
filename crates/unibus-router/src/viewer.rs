@@ -30,6 +30,7 @@ const DEADLINE: Duration = Duration::from_secs(10);
 const CSS: &str = include_str!("viewer/coherence-product.css");
 const LAYOUT: &str = include_str!("viewer/layout.css");
 mod advertisement;
+pub mod widgets;
 
 #[derive(Debug, Serialize)]
 pub struct Snapshot {
@@ -149,6 +150,11 @@ pub fn project<'a>(
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    #[serde(default)]
+    pub widgets: Vec<widgets::Definition>,
+    /// Explicit built Coherence bundle; never arbitrary request-selected paths.
+    #[serde(default)]
+    pub widget_assets: Option<PathBuf>,
     pub listen: SocketAddr,
     pub ca_file: PathBuf,
     pub cert_file: PathBuf,
@@ -156,12 +162,55 @@ pub struct Config {
     /// Bootstrap certificate SHA-256 -> existing node-grant identity. Never
     /// derive this from observations or import another peer's private key.
     pub certificate_bindings: BTreeMap<String, String>,
+    /// Optional exact human leaf pins, matching the Mycelium page bootstrap.
+    /// Each must already have a digest-to-principal binding; not fleet authority.
+    #[serde(default)]
+    pub bootstrap_viewer_certificates: Vec<PathBuf>,
     /// Optional application-owned Mycelium lease file; never an access grant.
     #[serde(default)]
     pub advertisement: Option<advertisement::Advertisement>,
 }
 impl Config {
     pub fn validate(&self) -> Result<()> {
+        ensure!(self.widgets.len() <= 32, "too many widget definitions");
+        let mut widget_ids = BTreeSet::new();
+        for definition in &self.widgets {
+            definition.validate()?;
+            ensure!(
+                widget_ids.insert(&definition.id),
+                "duplicate widget identity"
+            );
+        }
+        if !self.widgets.is_empty() {
+            ensure!(
+                self.widget_assets
+                    .as_ref()
+                    .is_some_and(|p| p.is_absolute() && p.is_dir()),
+                "widgets require an absolute built asset directory"
+            );
+            let directory = self.widget_assets.as_ref().unwrap();
+            for name in [
+                "coherence-widgets.js",
+                "coherence_widget_web.js",
+                "coherence_widget_web_bg.wasm",
+                "widgets.css",
+            ] {
+                let metadata =
+                    std::fs::metadata(directory.join(name)).context("widget asset missing")?;
+                ensure!(
+                    metadata.is_file() && metadata.len() > 0 && metadata.len() <= 8 * 1024 * 1024,
+                    "invalid widget asset size or type"
+                );
+            }
+        }
+        ensure!(
+            self.bootstrap_viewer_certificates.len() <= 64
+                && self
+                    .bootstrap_viewer_certificates
+                    .iter()
+                    .all(|p| p.is_absolute()),
+            "invalid bootstrap viewer certificate paths"
+        );
         if let Some(advertisement) = &self.advertisement {
             advertisement.validate(self.listen)?;
         }
@@ -230,6 +279,23 @@ fn tls(config: &Config) -> Result<Arc<rustls::ServerConfig>> {
     for cert in certificates(&config.ca_file)? {
         roots.add(cert)?;
     }
+    for path in &config.bootstrap_viewer_certificates {
+        ensure!(
+            std::fs::metadata(path)?.len() <= 65536,
+            "viewer leaf certificate exceeds bound"
+        );
+        let leaf = certificates(path)?;
+        ensure!(
+            leaf.len() == 1,
+            "viewer pin requires exactly one certificate"
+        );
+        let digest = format!("{:x}", Sha256::digest(leaf[0].as_ref()));
+        ensure!(
+            config.certificate_bindings.contains_key(&digest),
+            "viewer leaf pin lacks principal binding"
+        );
+        roots.add(leaf[0].clone())?;
+    }
     let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
         Arc::new(roots),
         Arc::new(rustls::crypto::ring::default_provider()),
@@ -257,6 +323,7 @@ pub fn start_optional(hub: Arc<Hub>) -> Result<()> {
         "viewer configuration path must be absolute"
     );
     let config = read_config(&path)?;
+    hub.configure_widgets(&config.widgets)?;
     let server = tls(&config)?;
     let listener = TcpListener::bind(config.listen).context("bind optional viewer")?;
     let advertisement_alive = config
@@ -379,6 +446,7 @@ fn connection(
         .map(|cert| format!("{:x}", Sha256::digest(cert.as_ref())))
         .context("viewer needs client certificate")?;
     let fresh = read_config(path)?;
+    hub.configure_widgets(&fresh.widgets)?;
     ensure!(
         fresh.listen == address,
         "viewer listener changed; restart required"
@@ -395,6 +463,58 @@ fn connection(
         return response(&mut stream, 400, "text/plain", b"Invalid request");
     };
     match target {
+        _ if target.starts_with("/api/widgets/") || target.starts_with("/views/") => {
+            let api = target.starts_with("/api/widgets/");
+            let id = if api { &target[13..] } else { &target[7..] };
+            let Some(definition) = fresh.widgets.iter().find(|d| d.id == id) else {
+                return response(&mut stream, 404, "text/plain", b"Not found");
+            };
+            let value = match hub.viewer_widget(principal, definition) {
+                Ok(value) => value,
+                Err(_) => return response(&mut stream, 403, "text/plain", b"Access denied"),
+            };
+            if api {
+                match value {
+                    Some(value) => response(
+                        &mut stream,
+                        200,
+                        "application/json",
+                        &serde_json::to_vec(&value)?,
+                    ),
+                    None => response(
+                        &mut stream,
+                        503,
+                        "text/plain",
+                        b"Waiting for authorized telemetry",
+                    ),
+                }
+            } else {
+                response_widgets(
+                    &mut stream,
+                    200,
+                    "text/html; charset=utf-8",
+                    render_widget(definition).as_bytes(),
+                )
+            }
+        }
+        _ if target.starts_with("/widgets/") => {
+            let (name, mime) = match &target[9..] {
+                "coherence-widgets.js" => ("coherence-widgets.js", "text/javascript"),
+                "coherence_widget_web.js" => ("coherence_widget_web.js", "text/javascript"),
+                "coherence_widget_web_bg.wasm" => {
+                    ("coherence_widget_web_bg.wasm", "application/wasm")
+                }
+                "widgets.css" => ("widgets.css", "text/css"),
+                _ => return response(&mut stream, 404, "text/plain", b"Not found"),
+            };
+            let Some(directory) = &fresh.widget_assets else {
+                return response(&mut stream, 404, "text/plain", b"Not found");
+            };
+            let file = std::fs::File::open(directory.join(name))?;
+            let mut bytes = Vec::new();
+            file.take(8 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+            response_widgets(&mut stream, 200, mime, &bytes)
+        }
         "/coherence.css" => response(&mut stream, 200, "text/css; charset=utf-8", CSS.as_bytes()),
         "/viewer.css" => response(
             &mut stream,
@@ -412,7 +532,7 @@ fn connection(
             &mut stream,
             200,
             "text/html; charset=utf-8",
-            render(&snapshot, None).as_bytes(),
+            render_index(&snapshot, None, &fresh.widgets, hub, principal).as_bytes(),
         ),
         _ if target.starts_with("/?q=") => {
             let query = decode_query(&target[4..])?;
@@ -420,7 +540,7 @@ fn connection(
                 &mut stream,
                 200,
                 "text/html; charset=utf-8",
-                render(&snapshot, Some(&query)).as_bytes(),
+                render_index(&snapshot, Some(&query), &fresh.widgets, hub, principal).as_bytes(),
             )
         }
         _ => response(&mut stream, 404, "text/plain", b"Not found"),
@@ -458,24 +578,75 @@ fn parse_request(request: &str) -> Option<&str> {
     (hosts == 1).then_some(target)
 }
 fn response(stream: &mut impl Write, status: u16, kind: &str, body: &[u8]) -> Result<()> {
+    response_policy(stream, status, kind, body, false)
+}
+fn response_widgets(stream: &mut impl Write, status: u16, kind: &str, body: &[u8]) -> Result<()> {
+    response_policy(stream, status, kind, body, true)
+}
+fn response_policy(
+    stream: &mut impl Write,
+    status: u16,
+    kind: &str,
+    body: &[u8],
+    widgets: bool,
+) -> Result<()> {
     ensure!(
-        body.len() <= MAX_RESPONSE,
+        body.len()
+            <= if widgets {
+                8 * 1024 * 1024
+            } else {
+                MAX_RESPONSE
+            },
         "viewer response exceeds byte budget"
     );
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
         403 => "Forbidden",
+        503 => "Service Unavailable",
         _ => "Not Found",
     };
     write!(
         stream,
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'\r\n\r\n",
-        body.len()
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; style-src 'self'; {scripts} form-action 'self'; frame-ancestors 'none'; base-uri 'none'\r\n\r\n",
+        body.len(),
+        scripts = if widgets {
+            "script-src 'self' 'wasm-unsafe-eval'; connect-src 'self';"
+        } else {
+            ""
+        }
     )?;
     stream.write_all(body)?;
     stream.flush()?;
     Ok(())
+}
+fn render_widget(definition: &widgets::Definition) -> String {
+    format!(
+        "<!doctype html><html lang=\"en\" data-co-profile=\"product\" data-co-theme=\"dark\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{title} · Coherence</title><link rel=\"stylesheet\" href=\"/coherence.css\"><link rel=\"stylesheet\" href=\"/viewer.css\"><link rel=\"stylesheet\" href=\"/widgets/widgets.css\"><script type=\"module\" src=\"/widgets/coherence-widgets.js\"></script></head><body><main class=\"co-container\"><a href=\"/\">Unibus index</a><h1>{title}</h1><p>Authorized read-only telemetry · {zone}</p><section class=\"co-widget\" data-co-widget=\"{id}\"><p data-co-status role=\"status\">Connecting to owner telemetry</p><canvas aria-hidden=\"true\"></canvas><div class=\"co-widget__labels\" data-co-labels></div></section></main></body></html>",
+        title = escape(&definition.title),
+        zone = escape(&definition.zone),
+        id = escape(&definition.id)
+    )
+}
+fn render_index(
+    snapshot: &Snapshot,
+    query: Option<&str>,
+    definitions: &[widgets::Definition],
+    hub: &Hub,
+    principal: &str,
+) -> String {
+    let mut links = String::from("<nav aria-label=\"Live views\">");
+    for definition in definitions {
+        if hub.viewer_widget(principal, definition).is_ok() {
+            links.push_str(&format!(
+                "<a class=\"co-btn\" href=\"/views/{}\">{}</a> ",
+                escape(&definition.id),
+                escape(&definition.title)
+            ));
+        }
+    }
+    links.push_str("</nav><form");
+    render(snapshot, query).replacen("<form", &links, 1)
 }
 fn escape(value: &str) -> String {
     value
@@ -654,12 +825,15 @@ mod tests {
     #[test]
     fn configuration_is_explicit_and_bounded() {
         let mut config = Config {
+            widgets: Vec::new(),
+            widget_assets: None,
             listen: "127.0.0.1:8444".parse().unwrap(),
             ca_file: "/private/ca.pem".into(),
             cert_file: "/private/server.pem".into(),
             key_file: "/private/key.pem".into(),
             certificate_bindings: BTreeMap::from([("a".repeat(64), "reader".into())]),
             advertisement: None,
+            bootstrap_viewer_certificates: Vec::new(),
         };
         config.validate().unwrap();
         config.listen = "0.0.0.0:8444".parse().unwrap();
