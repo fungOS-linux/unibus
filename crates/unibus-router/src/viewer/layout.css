@@ -1,0 +1,14 @@
+/* Page composition only. Colors, typography, controls and cards belong to Coherence. */
+main.co-container { max-width: 1200px; margin: auto; padding: var(--co-space-6); }
+header { margin-block-end: var(--co-space-6); }
+form { display: flex; gap: var(--co-space-3); align-items: center; flex-wrap: wrap; }
+form label { flex-basis: 100%; }
+form input { flex: 1 1 240px; }
+.resource-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: var(--co-space-4); }
+.resource-grid article { min-width: 0; overflow-wrap: anywhere; }
+details { margin-block-start: var(--co-space-4); }
+summary { cursor: pointer; }
+dt { margin-block-start: var(--co-space-3); color: var(--co-color-text-muted); }
+dd { margin-inline-start: 0; }
+footer { margin-block-start: var(--co-space-6); color: var(--co-color-text-muted); }
+.co-muted { color: var(--co-color-text-muted); }

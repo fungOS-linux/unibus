@@ -82,6 +82,31 @@ pub struct Hub {
 }
 
 impl Hub {
+    #[cfg(feature = "viewer")]
+    pub fn viewer_snapshot(&self, producer_id: &str) -> Result<crate::viewer::Snapshot> {
+        let grant = self
+            .grants
+            .get(producer_id)
+            .context("viewer principal has no grant")?
+            .to_grant();
+        ensure!(
+            grant
+                .capabilities
+                .iter()
+                .any(|c| c == crate::viewer::VIEWER_CAPABILITY),
+            "principal lacks viewer capability"
+        );
+        let registry = self
+            .registry
+            .lock()
+            .map_err(|_| anyhow::anyhow!("registry unavailable"))?;
+        crate::viewer::project(
+            &self.config.installation_id,
+            &grant,
+            registry.all(),
+            &self.config.routes,
+        )
+    }
     fn admitted_registration(&self, producer_id: &str, envelope: &Envelope) -> Result<EdgeNode> {
         ensure!(
             envelope.producer_id == producer_id,

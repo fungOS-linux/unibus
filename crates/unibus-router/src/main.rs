@@ -95,5 +95,13 @@ fn main() -> Result<()> {
         }
         hub = hub.with_plugin(Arc::new(gateway));
     }
-    Arc::new(hub.with_plugin(Arc::new(StreamRouter::default()))).serve()
+    let hub = Arc::new(hub.with_plugin(Arc::new(StreamRouter::default())));
+    #[cfg(feature = "viewer")]
+    unibus_router::viewer::start_optional(hub.clone())?;
+    #[cfg(not(feature = "viewer"))]
+    anyhow::ensure!(
+        std::env::var_os("UNIBUS_VIEWER_CONFIG").is_none(),
+        "UNIBUS_VIEWER_CONFIG requires the viewer build feature"
+    );
+    hub.serve()
 }

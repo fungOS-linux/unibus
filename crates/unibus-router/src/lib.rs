@@ -16,6 +16,8 @@ pub mod plugin;
 pub mod quic;
 pub mod registry;
 pub mod stream_router;
+#[cfg(feature = "viewer")]
+pub mod viewer;
 
 pub use config::{HubConfig, NodeConfig, QuicConfig, RouteRule, RouteTarget};
 pub use hub::Hub;
