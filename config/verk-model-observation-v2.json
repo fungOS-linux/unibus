@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "stream_id": "verk/models/cad-recovery",
+  "source_resource": "verk/cad/teacher-replay",
+  "semantic": {"kind":"model.evidence","dimensions":{"domain":"cad","evidence":"teacher-replay"}},
+  "payload": {"contract":"verk.model-observation.v1","maximum_bytes":8192},
+  "observation": {
+    "values": [
+      {"name":"completed","quantity":"episodes","unit":"{episode}","value":{"shape":"scalar","metric":"gauge","aggregations":["last"]}},
+      {"name":"failed","quantity":"episodes","unit":"{episode}","value":{"shape":"scalar","metric":"gauge","aggregations":["last"]}}
+    ],
+    "expected_cadence_ms":5000,"maximum_age_ms":30000
+  },
+  "encoding":{"kind":"json"},
+  "clock":{"kind":"wall_clock","synchronization":"ntp"},
+  "delivery":{"class":"stream","maximum_age_ms":30000,"coalescing":"stream_id"},
+  "required_consumer_capabilities":["verk.models.consume"],
+  "provenance":{"producer":"verk-cad-owner","transform":"sanitized-owner-evidence; not learned model quality"}
+}
