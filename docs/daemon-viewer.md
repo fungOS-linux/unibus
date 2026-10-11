@@ -68,6 +68,59 @@ TLS identity, and access policy exist. DNS is not authorization, and picking a
 reachable resolver or address is not IP anycast. This feature does not change
 DNS, firewall rules, Mycelium advertisements, or fleet configuration.
 
+### Application-owned advertisement (optional)
+
+To opt in, add an `advertisement` object to the viewer configuration:
+
+```json
+{
+  "node_id": "YOUR_CANONICAL_MYCELIUM_NODE_ID",
+  "path": "/absolute/mycelium-home/application-services.d/unibus-viewer.json"
+}
+```
+
+Use the exact Mycelium node ID, not the display hostname. Provision that private
+directory for the daemon's OS user first. The listener must bind an actual
+non-loopback address; loopback is never promoted into remote availability.
+After binding, Unibus atomically writes one shared `ServiceCatalog` owner lease
+and renews it every 30 seconds with a 120-second expiry. It refuses to overwrite
+another application's document. Removing/changing advertisement configuration
+stops renewal; restart is required to resume. Failure logs loudly and stops
+renewal rather than keeping a false availability claim alive.
+
+Mycelium's normal scan imports this file and carries it through existing signed
+topology gossip. A scan does not renew the lease: schedule scans more frequently
+than its expiry if persistent remote discovery is desired. Removing the file
+does not immediately revoke previously gossiped evidence; authorization remains
+the viewer's own responsibility. No background scanner is installed here.
+
+In the Mycelium DNS resolver settings, explicitly enable:
+
+```json
+"service_aliases": { "unibus-viewer": "unibus", "mycelium-host-web": "mycelium" }
+```
+
+The resolver uses fresh owner catalog entries plus fresh, site-scoped, reachable
+peer addresses. It publishes `unibus.HOST.SITE.myc` only if the literal HTTPS
+endpoint address matches that owner. It ignores scanned listeners, expired
+leases, other owners, loopback, paths, and credential-bearing endpoints. Ports
+remain in the service catalog, not DNS: use
+`https://unibus.neo.wagar-house.myc:8444/` unless an owned ingress is explicitly
+configured for 443. Issue a server certificate whose SAN covers that exact name.
+
+Mycelium host pages use the same route and owner-file contract with explicit
+`advertise: true` in their host-web configuration. Neither app installs a DNS
+resolver, changes LAN exposure, or grants access by enabling an advertisement.
+
+For a manual end-to-end check: enable the viewer and its owner file, run
+`mycelium scan`, inspect `mycelium services --kind unibus-viewer --json`, and
+review `mycelium-dns-resolver plan --config ABSOLUTE_SETTINGS_PATH` before
+applying DNS through its existing explicit write workflow. Finally, request
+the named `/api/index` using the CA and authorized human certificate. Verify
+that an unbound client is denied, removing its binding denies the next request,
+and stopping lease renewal withdraws the alias after its original expiry.
+Do not use `curl -k` to work around a certificate/SAN mismatch.
+
 ## Verify
 
 ```sh

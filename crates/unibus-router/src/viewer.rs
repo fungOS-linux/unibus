@@ -29,6 +29,7 @@ const MAX_RESPONSE: usize = 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(10);
 const CSS: &str = include_str!("viewer/coherence-product.css");
 const LAYOUT: &str = include_str!("viewer/layout.css");
+mod advertisement;
 
 #[derive(Debug, Serialize)]
 pub struct Snapshot {
@@ -155,9 +156,15 @@ pub struct Config {
     /// Bootstrap certificate SHA-256 -> existing node-grant identity. Never
     /// derive this from observations or import another peer's private key.
     pub certificate_bindings: BTreeMap<String, String>,
+    /// Optional application-owned Mycelium lease file; never an access grant.
+    #[serde(default)]
+    pub advertisement: Option<advertisement::Advertisement>,
 }
 impl Config {
     pub fn validate(&self) -> Result<()> {
+        if let Some(advertisement) = &self.advertisement {
+            advertisement.validate(self.listen)?;
+        }
         ensure!(
             self.listen.port() != 0
                 && self.listen.port() != 80
@@ -252,6 +259,11 @@ pub fn start_optional(hub: Arc<Hub>) -> Result<()> {
     let config = read_config(&path)?;
     let server = tls(&config)?;
     let listener = TcpListener::bind(config.listen).context("bind optional viewer")?;
+    let advertisement_alive = config
+        .advertisement
+        .as_ref()
+        .map(|ad| advertisement::start(ad.clone(), config.listen, path.clone()))
+        .transpose()?;
     let address = config.listen;
     let active = Arc::new(AtomicUsize::new(0));
     std::thread::Builder::new()
@@ -262,6 +274,9 @@ pub fn start_optional(hub: Arc<Hub>) -> Result<()> {
                     Ok(socket) => socket,
                     Err(error) => {
                         tracing::error!(%error,"viewer accept failed");
+                        if let Some(alive) = &advertisement_alive {
+                            alive.store(false, Ordering::Release);
+                        }
                         break;
                     }
                 };
@@ -644,6 +659,7 @@ mod tests {
             cert_file: "/private/server.pem".into(),
             key_file: "/private/key.pem".into(),
             certificate_bindings: BTreeMap::from([("a".repeat(64), "reader".into())]),
+            advertisement: None,
         };
         config.validate().unwrap();
         config.listen = "0.0.0.0:8444".parse().unwrap();

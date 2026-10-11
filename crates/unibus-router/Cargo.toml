@@ -10,7 +10,7 @@ description = "Hub daemon for the household bus: registry, grants, and QoS-aware
 default = []
 owner-catalog = ["dep:fpl-resource-observation", "dep:sha2"]
 managed-gateway = ["dep:unibus-mycelium"]
-viewer = ["dep:sha2"]
+viewer = ["dep:sha2", "dep:fpl-resource-observation"]
 
 [dependencies]
 anyhow = { workspace = true }
