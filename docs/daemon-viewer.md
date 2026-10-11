@@ -134,3 +134,12 @@ escaping, request parsing, configuration limits, and inventory overflow.
 Before LAN deployment, additionally verify client-certificate acceptance,
 unbound-certificate rejection, and binding revocation end to end with the
 deployment CA. No live deployment is implied by these unit tests.
+# Shared environment navigation
+
+The optional `mycelium_viewer_url` configuration field supplies an explicit HTTPS
+entrance for the shared Coherence Mycelium / Unibus pill. Without it, Mycelium is
+visibly unavailable, not linked to a guessed host. Each viewer authenticates and
+authorizes independently; clicking a pill neither grants access nor proxies data.
+This is navigation, not fleet aggregation: the existing index remains local and
+ACL-filtered. Access zones must not be relabeled as Mycelium sites.
+

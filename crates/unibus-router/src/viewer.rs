@@ -30,6 +30,9 @@ const DEADLINE: Duration = Duration::from_secs(10);
 const CSS: &str = include_str!("viewer/coherence-product.css");
 const LAYOUT: &str = include_str!("viewer/layout.css");
 mod advertisement;
+#[path = "../../../vendor/coherence-viewer-shell/lib.rs"]
+#[allow(dead_code)]
+mod shell;
 pub mod widgets;
 
 #[derive(Debug, Serialize)]
@@ -150,6 +153,9 @@ pub fn project<'a>(
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Explicit authorized viewer entrance; discovery never implies access.
+    #[serde(default)]
+    pub mycelium_viewer_url: Option<String>,
     #[serde(default)]
     pub widgets: Vec<widgets::Definition>,
     /// Explicit built Coherence bundle; never arbitrary request-selected paths.
@@ -493,7 +499,11 @@ fn connection(
                     &mut stream,
                     200,
                     "text/html; charset=utf-8",
-                    render_widget(definition).as_bytes(),
+                    with_switcher(
+                        render_widget(definition),
+                        fresh.mycelium_viewer_url.as_deref(),
+                    )
+                    .as_bytes(),
                 )
             }
         }
@@ -520,7 +530,7 @@ fn connection(
             &mut stream,
             200,
             "text/css; charset=utf-8",
-            LAYOUT.as_bytes(),
+            format!("{LAYOUT}\n{}", shell::CSS).as_bytes(),
         ),
         "/api/index" => response(
             &mut stream,
@@ -532,7 +542,11 @@ fn connection(
             &mut stream,
             200,
             "text/html; charset=utf-8",
-            render_index(&snapshot, None, &fresh.widgets, hub, principal).as_bytes(),
+            with_switcher(
+                render_index(&snapshot, None, &fresh.widgets, hub, principal),
+                fresh.mycelium_viewer_url.as_deref(),
+            )
+            .as_bytes(),
         ),
         _ if target.starts_with("/?q=") => {
             let query = decode_query(&target[4..])?;
@@ -540,7 +554,11 @@ fn connection(
                 &mut stream,
                 200,
                 "text/html; charset=utf-8",
-                render_index(&snapshot, Some(&query), &fresh.widgets, hub, principal).as_bytes(),
+                with_switcher(
+                    render_index(&snapshot, Some(&query), &fresh.widgets, hub, principal),
+                    fresh.mycelium_viewer_url.as_deref(),
+                )
+                .as_bytes(),
             )
         }
         _ => response(&mut stream, 404, "text/plain", b"Not found"),
@@ -619,6 +637,16 @@ fn response_policy(
     stream.write_all(body)?;
     stream.flush()?;
     Ok(())
+}
+fn with_switcher(page: String, other: Option<&str>) -> String {
+    page.replacen(
+        "<main class=\"co-container\">",
+        &format!(
+            "<main class=\"co-container\">{}",
+            shell::switcher(shell::View::Unibus, other)
+        ),
+        1,
+    )
 }
 fn render_widget(definition: &widgets::Definition) -> String {
     format!(
@@ -825,6 +853,7 @@ mod tests {
     #[test]
     fn configuration_is_explicit_and_bounded() {
         let mut config = Config {
+            mycelium_viewer_url: None,
             widgets: Vec::new(),
             widget_assets: None,
             listen: "127.0.0.1:8444".parse().unwrap(),

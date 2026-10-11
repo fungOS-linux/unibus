@@ -1,0 +1,26 @@
+/* Shared page primitives. Coherence product tokens are the source of theme. */
+.co-viewer-switch {
+  display: inline-flex;
+  gap: var(--co-space-1, .25rem);
+  padding: var(--co-space-1, .25rem);
+  border: 1px solid var(--co-color-border, #435044);
+  border-radius: 999px;
+  background: var(--co-color-surface, #252d27);
+  margin-block-end: var(--co-space-5, 1.25rem);
+}
+.co-viewer-switch a, .co-viewer-switch span {
+  padding: .5rem 1rem;
+  border-radius: 999px;
+  color: var(--co-color-text, #e5ece3);
+  text-decoration: none;
+  font: inherit;
+}
+.co-viewer-switch [aria-current] {
+  background: var(--co-color-brand, #d3e6c6);
+  color: var(--co-color-background, #252d27);
+}
+.co-viewer-switch [aria-disabled] { color: var(--co-color-text-muted, #b3c4af); }
+.co-viewer-switch a:focus-visible { outline: 2px solid var(--co-color-brand, #d3e6c6); outline-offset: 2px; }
+.co-viewer-sites { display: flex; flex-wrap: wrap; gap: var(--co-space-3, .75rem); margin-block: var(--co-space-5, 1.25rem); }
+.co-viewer-site { scroll-margin-block-start: 1rem; margin-block: var(--co-space-6, 1.5rem); }
+.co-viewer-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: var(--co-space-4, 1rem); }
