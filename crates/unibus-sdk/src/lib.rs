@@ -30,6 +30,8 @@ pub struct Publish {
 #[derive(Debug, Serialize)]
 pub struct Event {
     pub producer_id: String,
+    /// Addressed recipient, if the sender targeted one producer.
+    pub destination: Option<String>,
     pub request_id: String,
     pub issued_at_unix_ms: u64,
     pub kind: String,
@@ -117,6 +119,7 @@ impl Session {
                         }
                         let event = Event {
                             producer_id: envelope.producer_id,
+                            destination: envelope.destination,
                             request_id: envelope.request_id,
                             issued_at_unix_ms: envelope.issued_at_unix_ms,
                             kind: envelope.message.kind,
@@ -338,6 +341,7 @@ mod tests {
     fn projection_has_no_credentials() {
         let event = Event {
             producer_id: "source".into(),
+            destination: None,
             request_id: "1".into(),
             issued_at_unix_ms: 1,
             kind: "test".into(),
