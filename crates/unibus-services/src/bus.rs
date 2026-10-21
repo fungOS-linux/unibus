@@ -355,6 +355,7 @@ mod tests {
         };
         let mut event = Event {
             producer_id: binding.producer_id.clone(),
+            destination: None,
             request_id: "1".into(),
             issued_at_unix_ms: 100,
             kind: SERVICE_CATALOG_KIND.into(),
@@ -364,6 +365,7 @@ mod tests {
         assert!(BusInventory::new(vec![binding.clone(), binding]).is_err());
         let early_health = Event {
             producer_id: "pi-catalog".into(),
+            destination: None,
             request_id: "early".into(),
             issued_at_unix_ms: 100,
             kind: SERVICE_HEALTH_KIND.into(),
