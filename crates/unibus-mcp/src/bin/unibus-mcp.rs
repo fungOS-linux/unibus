@@ -23,6 +23,11 @@ struct Config {
     unibus: Option<ClientConfig>,
     #[serde(default = "default_lease_ms")]
     lease_ms: u64,
+    /// Accepted for compatibility with configs written by newer trees; this
+    /// publisher does not use the bridge-side mutation policy flag.
+    #[serde(default)]
+    #[allow(dead_code)]
+    lan_permissive_mutations: bool,
     #[serde(default)]
     providers: Vec<ProviderConfig>,
     #[serde(default)]
@@ -98,6 +103,14 @@ fn inspect(config: &Config) -> Result<Vec<ProviderAdvertisement>> {
         output.push(advertisement);
     }
     Ok(output)
+}
+
+fn provider_location(config: &ProviderConfig) -> String {
+    if config.transport == "stdio" {
+        format!("stdio command {}", config.command)
+    } else {
+        config.endpoint.clone()
+    }
 }
 
 fn publish(config: Config) -> Result<()> {
@@ -187,9 +200,11 @@ fn publish(config: Config) -> Result<()> {
                     retry,
                 } => {
                     providers[index].ready = false;
+                    let provider = &providers[index].config;
                     eprintln!(
-                        "MCP provider {} unavailable: {}; retry in {}s",
-                        providers[index].config.provider_id,
+                        "MCP provider {} unavailable at {}: {}; skipping this provider, retry in {}s",
+                        provider.provider_id,
+                        provider_location(provider),
                         error,
                         retry.as_secs()
                     );
