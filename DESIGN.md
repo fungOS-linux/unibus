@@ -121,6 +121,13 @@ to the configured subject, producer, audience, installation, assertion lifetime,
 and granted capability/zone/anchor scope. Signature/JWKS ownership remains in
 the fpl-auth integration rather than being duplicated in this crate.
 
+## Authority, index, enforcement
+
+Mycelium owns identity, grants and discovery. Unibus consumes signed authority
+records as an expiring projection and enforces them; it never mints grants or
+identities. External HTTP/RPC targets are indexed by `unibus-targets` with no
+ACLs attached. See `docs/authority-index-enforcement.md`.
+
 ## Invariants
 
 - Grants and signed direct-session assertions remain authoritative regardless
