@@ -75,6 +75,13 @@ topics and binary payloads over the reliable `mqtt.publish.v1` Unibus contract.
 Broker sessions, retained state, and MQTT acknowledgements remain broker-owned.
 See [`docs/mqtt-bridge-runbook.md`](docs/mqtt-bridge-runbook.md).
 
+`crates/unibus-mail` — bounded POP3/IMAP metadata contracts. The mail owner
+keeps the mailbox session and publishes only `email.account.v1`,
+`email.message.v1`, and `email.delta.v1`; content is fetched through an
+authorized `email.fetch.v1` request and is never broadcast. Credentials are
+named as `geode://...` references and resolved only by the local owner. See
+[`docs/mail-bridge-runbook.md`](docs/mail-bridge-runbook.md).
+
 Routing is configuration: the hub maps message kinds to capabilities via a
 `routes` table; unknown kinds without a plugin fail loudly. The hub parses
 only `register` — every data body stays opaque.
