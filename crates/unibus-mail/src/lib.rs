@@ -224,7 +224,7 @@ impl Message {
         }
         let mut seen = std::collections::BTreeSet::new();
         for flag in &self.flags {
-            token(flag, "flag", 64)?;
+            flag_token(flag)?;
             if !seen.insert(flag) {
                 return Err("duplicate flag".into());
             }
@@ -369,6 +369,24 @@ fn id(value: &str, field: &str, max: usize) -> Result<(), String> {
             .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
     {
         return Err(format!("invalid {field}"));
+    }
+    Ok(())
+}
+
+/// IMAP system flags are written with a leading backslash (`\Seen`); custom
+/// flags and keywords are bare tokens. Both must be bounded and printable.
+fn flag_token(value: &str) -> Result<(), String> {
+    if value == "\\*" {
+        return Ok(());
+    }
+    let name = value.strip_prefix('\\').unwrap_or(value);
+    if name.is_empty()
+        || name.len() > 64
+        || name.bytes().any(|byte| {
+            !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'$'))
+        })
+    {
+        return Err("invalid flag".into());
     }
     Ok(())
 }
@@ -553,6 +571,17 @@ mod tests {
         let value = serde_json::to_value(&message).unwrap();
         assert!(value.get("body").is_none());
         assert_eq!(serde_json::from_value::<Message>(value).unwrap(), message);
+    }
+
+    #[test]
+    fn imap_system_and_custom_flags_are_valid() {
+        let mut message = message();
+        message.flags = vec!["\\Seen".into(), "\\Flagged".into(), "$Forwarded".into()];
+        message.validate().unwrap();
+        message.flags = vec!["\\*".into()];
+        message.validate().unwrap();
+        message.flags = vec!["bad flag".into()];
+        assert!(message.validate().is_err());
     }
 
     #[test]

@@ -1,7 +1,11 @@
 # Mail bridge runbook
 
-Status: **contracts only**. `unibus-mail` defines the documents; the IMAP owner
-adapter and the `geode` credential client are the next slices.
+Status: **contracts + IMAP owner engine**. `unibus-mail` defines the documents;
+`unibus-mail-imap` owns a real IMAP session and the credential seam. The daemon
+loop that publishes to Unibus and serves fetch requests is the next slice.
+
+Gmail is the same engine with XOAUTH2; see [`mail-gmail.md`](mail-gmail.md) for
+the scope trade-off between IMAP and the Gmail API.
 
 ## Scope
 

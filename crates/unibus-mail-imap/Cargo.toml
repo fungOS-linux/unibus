@@ -1,0 +1,22 @@
+[package]
+name = "unibus-mail-imap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bounded IMAP owner adapter for the Unibus mail bridge"
+
+[dependencies]
+anyhow.workspace = true
+async-imap.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "rt", "time"] }
+tokio-rustls.workspace = true
+unibus-mail.workspace = true
+webpki-roots.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

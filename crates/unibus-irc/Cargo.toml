@@ -1,0 +1,17 @@
+[package]
+name = "unibus-irc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bounded IRC session and metadata projection for the Unibus chat bridge"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "sync", "time"] }
+unibus-chat.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

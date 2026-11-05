@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/unibus", "crates/unibus-dcp", "crates/unibus-device", "crates/unibus-fix", "crates/unibus-input", "crates/unibus-mcp", "crates/unibus-mail", "crates/unibus-media", "crates/unibus-midi", "crates/unibus-mqtt", "crates/unibus-mycelium", "crates/unibus-qemu", "crates/unibus-quic", "crates/unibus-recording", "crates/unibus-router", "crates/stream-descriptors", "crates/unibus-sdk", "crates/unibus-lua", "crates/unibus-ffi", "crates/unibus-adb", "crates/unibus-bambu", "crates/unibus-plugin", "crates/unibus-hdhomerun", "crates/unibus-services", "crates/unibus-ipfs", "crates/unibus-cast", "crates/unibus-iroh", "crates/unibus-canvas", "crates/unibus-targets"]
+members = ["crates/unibus", "crates/unibus-dcp", "crates/unibus-device", "crates/unibus-fix", "crates/unibus-input", "crates/unibus-mcp", "crates/unibus-mail", "crates/unibus-media", "crates/unibus-midi", "crates/unibus-mqtt", "crates/unibus-mycelium", "crates/unibus-qemu", "crates/unibus-quic", "crates/unibus-recording", "crates/unibus-router", "crates/stream-descriptors", "crates/unibus-sdk", "crates/unibus-lua", "crates/unibus-ffi", "crates/unibus-adb", "crates/unibus-bambu", "crates/unibus-plugin", "crates/unibus-hdhomerun", "crates/unibus-services", "crates/unibus-ipfs", "crates/unibus-cast", "crates/unibus-iroh", "crates/unibus-canvas", "crates/unibus-targets", "crates/unibus-chat", "crates/unibus-irc", "crates/unibus-mail-imap"]
 resolver = "2"
 exclude = ["crates/unibus-holodeck"]
 
@@ -13,6 +13,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 json5 = "0.4"
 anyhow = "1"
+async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 subtle = "2"
@@ -29,4 +30,10 @@ rumqttc = "0.25"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
 dcp = { git = "https://github.com/FuturePresentLabs/dcp.git", rev = "d3a1335" }
 unibus = { path = "crates/unibus" }
+unibus-chat = { path = "crates/unibus-chat" }
+unibus-mail = { path = "crates/unibus-mail" }
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+futures-util = "0.3"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+webpki-roots = "1"
 unibus-quic = { path = "crates/unibus-quic" }
