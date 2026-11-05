@@ -36,10 +36,9 @@ export AGENTMAIL_API_KEY=...
 unibus-mail-imap config/mail-agentmail.example.json
 ```
 
-The example uses `geode://agentmail/inbox/api-key`; with the current
-`unibus-credentials` env mapping that reads
-`GEODE_AGENTMAIL_INBOX_API_KEY`. Replace with `env://AGENTMAIL_API_KEY` for a
-quick local test, or point geoded at the same reference once it is running.
+The example uses `geode://agentmail/inbox/api-key`, leased from `geoded`. For a
+quick local test, replace it with `env://AGENTMAIL_API_KEY`, or set
+`GEODE_ENV_FALLBACK=1` to read `GEODE_AGENTMAIL_INBOX_API_KEY`.
 
 ## Scope
 

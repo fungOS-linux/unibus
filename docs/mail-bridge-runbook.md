@@ -20,10 +20,9 @@ configured folder on the account cadence, and answers `email.fetch.v1` with a
 bounded raw message (`message/rfc822`).
 
 Credentials resolve through `unibus-credentials`: `env://NAME` directly, and
-`geode://realm/account/slot` through the environment variable geode's
-`EnvBackend` uses (`GEODE_REALM_ACCOUNT_SLOT`). That is the only geode backend
-reachable without a host IPC boundary today; a `geoded` client can replace the
-module without changing configuration.
+`geode://realm/account/slot` by leasing from `geoded` on
+`$GEODE_SOCKET` (default `~/.geode/geode.sock`). Set `GEODE_ENV_FALLBACK=1` to
+use geode's `EnvBackend` mapping (`GEODE_REALM_ACCOUNT_SLOT`) for tests.
 
 Gmail uses the `oauth` block: `account.credential_ref` names the refresh token,
 `oauth.client_secret_ref` names the client secret, and the adapter refreshes an

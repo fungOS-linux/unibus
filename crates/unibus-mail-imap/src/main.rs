@@ -283,15 +283,23 @@ async fn connect_session(config: &BridgeConfig) -> Result<ImapSession> {
             !config.account.credential_ref.is_empty(),
             "Gmail OAuth needs account.credential_ref to name the refresh token"
         );
-        let refresh = unibus_credentials::resolve(&config.account.credential_ref)?
-            .context("refresh token reference resolved to nothing")?;
-        let client_secret = unibus_credentials::resolve(&oauth.client_secret_ref)?
-            .context("client secret reference resolved to nothing")?;
+        let refresh = unibus_credentials::resolve_with_purpose(
+            &config.account.credential_ref,
+            "mail.connect",
+        )?
+        .context("refresh token reference resolved to nothing")?;
+        let client_secret =
+            unibus_credentials::resolve_with_purpose(&oauth.client_secret_ref, "mail.connect")?
+                .context("client secret reference resolved to nothing")?;
         let access = refresh_access_token(oauth, &refresh, &client_secret).await?;
         MailAuth::XOAuth2(access)
     } else {
         MailAuth::Password(
-            unibus_credentials::resolve(&config.account.credential_ref)?.unwrap_or_default(),
+            unibus_credentials::resolve_with_purpose(
+                &config.account.credential_ref,
+                "mail.connect",
+            )?
+            .unwrap_or_default(),
         )
     };
     ImapSession::connect_with_auth(config.account.clone(), auth, config.publish_metadata).await

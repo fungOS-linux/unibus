@@ -357,7 +357,7 @@ async fn handle_send(
 }
 
 fn resolve_secret(reference: &str) -> Result<Option<String>> {
-    unibus_credentials::resolve(reference)
+    unibus_credentials::resolve_with_purpose(reference, "chat.connect")
 }
 
 fn publish<T: serde::Serialize>(client: &Client, kind: &str, body: &T) -> Result<()> {

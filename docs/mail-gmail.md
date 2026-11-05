@@ -128,11 +128,12 @@ still `imap.gmail.com`. Delegated/shared mailboxes are not supported in v1: run
 one bridge config and one producer per mailbox. If Workspace policy forbids
 IMAP or full-scope OAuth, use the Gmail API adapter instead.
 
-The example config is `config/mail-gmail-imap.example.json`. With the env-backed
-geode mapping, the refresh token and client secret come from
-`GEODE_OAUTH_GOOGLE_AVERY_REFRESH` and
-`GEODE_OAUTH_GOOGLE_AVERY_CLIENT_SECRET` until a real geode backend/IPC is
-wired.
+The example config is `config/mail-gmail-imap.example.json`. With `geoded`
+running, store the refresh token and client secret at
+`geode://oauth/google.avery/refresh` and
+`geode://oauth/google.avery/client-secret`. For a quick test without geoded,
+set `GEODE_ENV_FALLBACK=1` and use
+`GEODE_OAUTH_GOOGLE_AVERY_REFRESH` / `..._CLIENT_SECRET`.
 
 ## Recommendation
 

@@ -7,3 +7,6 @@ description = "Reference resolution for Unibus adapters (env:// and geode://)"
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
