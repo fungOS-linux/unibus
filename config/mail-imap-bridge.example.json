@@ -1,0 +1,35 @@
+{
+  "bus": {
+    "installation_id": "home",
+    "producer_id": "mail-work",
+    "hub_endpoint": "127.0.0.1:18790",
+    "token_file": "mail-work.token",
+    "zones": ["home-lan"],
+    "capabilities": ["mail.bridge"],
+    "screen_anchors": [],
+    "schema_version": 2,
+    "read_timeout_ms": 10000
+  },
+  "account": {
+    "schema_version": 1,
+    "account_id": "mail-work",
+    "protocol": "imap",
+    "host": "imap.example.com",
+    "port": 993,
+    "tls": true,
+    "username": "avery@example.com",
+    "credential_ref": "env://MAIL_WORK_PASSWORD",
+    "folders": ["INBOX"],
+    "poll_interval_ms": 30000,
+    "capabilities": {
+      "push": false,
+      "folders": true,
+      "flags": true,
+      "delete": true,
+      "uidl": false
+    }
+  },
+  "publish_metadata": false,
+  "batch_size": 64,
+  "initial_max": 64
+}

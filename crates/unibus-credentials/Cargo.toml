@@ -1,0 +1,9 @@
+[package]
+name = "unibus-credentials"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reference resolution for Unibus adapters (env:// and geode://)"
+
+[dependencies]
+anyhow.workspace = true

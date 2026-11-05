@@ -1,7 +1,34 @@
 # Mail bridge runbook
 
-Status: **contracts only**. `unibus-mail` defines the documents; the IMAP owner
-adapter and the `geode` credential client are the next slices.
+Status: **contracts + IMAP owner engine**. `unibus-mail` defines the documents;
+`unibus-mail-imap` owns a real IMAP session and the credential seam. The daemon
+loop that publishes to Unibus and serves fetch requests is the next slice.
+
+Gmail is the same engine with XOAUTH2; see [`mail-gmail.md`](mail-gmail.md) for
+the scope trade-off between IMAP and the Gmail API.
+
+## Running the bridge
+
+`unibus-mail-imap` is the publisher loop:
+
+```sh
+unibus-mail-imap config/mail-imap-bridge.example.json
+```
+
+It registers with `mail.bridge`, publishes `email.account.v1` once, polls each
+configured folder on the account cadence, and answers `email.fetch.v1` with a
+bounded raw message (`message/rfc822`).
+
+Credentials resolve through `unibus-credentials`: `env://NAME` directly, and
+`geode://realm/account/slot` through the environment variable geode's
+`EnvBackend` uses (`GEODE_REALM_ACCOUNT_SLOT`). That is the only geode backend
+reachable without a host IPC boundary today; a `geoded` client can replace the
+module without changing configuration.
+
+Gmail uses the `oauth` block: `account.credential_ref` names the refresh token,
+`oauth.client_secret_ref` names the client secret, and the adapter refreshes an
+access token before each connect (`MailAuth::XOAuth2`). See
+[`mail-gmail.md`](mail-gmail.md).
 
 ## Scope
 
