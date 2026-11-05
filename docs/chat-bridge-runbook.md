@@ -137,9 +137,9 @@ It registers as `producer_id`, advertises `chat.bridge`, publishes
 `chat.account.v1` once, then one delta per observed message. It polls the bus
 every 100 ms for `chat.fetch.v1` and replies to the requester only.
 
-Current binary limitation: it resolves `env://NAME` credentials. A `geode://`
-reference needs a host process with the geode client; the library already takes
-any `CredentialResolver`, so the daemon wiring is a small follow-up.
+Credentials: `env://NAME`, or `geode://realm/account/slot` leased from a
+running `geoded` socket. Set `GEODE_ENV_FALLBACK=1` for geode's env mapping in
+tests.
 
 ## Next slices
 

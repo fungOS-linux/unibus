@@ -96,8 +96,9 @@ bounded in-memory text ring so `chat.fetch.v1` never broadcasts message bodies.
 See [`docs/chat-bridge-runbook.md`](docs/chat-bridge-runbook.md).
 
 `crates/unibus-credentials` — shared `env://` and `geode://` resolution for the
-adapters. `geode://realm/account/slot` maps to geode's `EnvBackend` variable
-until a host IPC/backend exists; resolution is one swappable module.
+adapters. `geode://realm/account/slot` leases from a running `geoded` Unix
+socket; `GEODE_ENV_FALLBACK=1` selects geode's `EnvBackend` mapping for
+development/tests.
 
 Routing is configuration: the hub maps message kinds to capabilities via a
 `routes` table; unknown kinds without a plugin fail loudly. The hub parses
