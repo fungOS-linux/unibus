@@ -20,6 +20,8 @@ pub const MESSAGE_KIND: &str = "chat.message.v1";
 pub const DELTA_KIND: &str = "chat.delta.v1";
 pub const FETCH_KIND: &str = "chat.fetch.v1";
 pub const FETCH_REPLY_KIND: &str = "chat.fetch.reply.v1";
+pub const SEND_KIND: &str = "chat.send.v1";
+pub const SEND_REPLY_KIND: &str = "chat.send.reply.v1";
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_ACCOUNT_ID: usize = 128;
@@ -32,6 +34,8 @@ pub const MAX_MESSAGE_ID: usize = 256;
 pub const MAX_FLAGS: usize = 16;
 pub const MAX_DELTA_MESSAGES: usize = 512;
 pub const MAX_FETCH_BYTES: u64 = 4 * 1024 * 1024;
+/// IRC lines are bounded; sending is not a bulk channel.
+pub const MAX_SEND_BYTES: u64 = 16 * 1024;
 
 /// The upstream transport an adapter owns. IRC is the first implementation;
 /// Beeper/Matrix and other transports reuse the same documents.
@@ -290,6 +294,86 @@ impl Delta {
         }
         if upserts.intersection(&expunged).next().is_some() {
             return Err("a message cannot be both upserted and expunged".into());
+        }
+        Ok(())
+    }
+}
+
+/// An authorized outbound message.
+///
+/// Sending is a **separate grant** from reading: a producer that may receive
+/// `chat.message.v1` or call `chat.fetch.v1` does not thereby gain `chat.send`.
+/// The text travels in the Unibus binary payload, never in this JSON document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SendRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub account_id: String,
+    pub channel: String,
+    /// UTF-8 length of the binary payload.
+    pub text_bytes: u64,
+}
+
+impl SendRequest {
+    pub fn validate(&self, payload_len: usize) -> Result<(), String> {
+        if self.schema_version != SCHEMA_VERSION {
+            return Err("unsupported send schema".into());
+        }
+        id(&self.request_id, "request_id", MAX_ACCOUNT_ID)?;
+        id(&self.account_id, "account_id", MAX_ACCOUNT_ID)?;
+        channel_name(&self.channel)?;
+        if self.text_bytes != payload_len as u64 {
+            return Err("text_bytes does not match the payload".into());
+        }
+        if self.text_bytes == 0 || self.text_bytes > MAX_SEND_BYTES {
+            return Err("send text is outside its bounds".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SendRejection {
+    NotEnabled,
+    NotAuthorized,
+    UnknownChannel,
+    TooLarge,
+    Malformed,
+    Transport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SendResponse {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub account_id: String,
+    pub channel: String,
+    pub accepted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection: Option<SendRejection>,
+}
+
+impl SendResponse {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != SCHEMA_VERSION {
+            return Err("unsupported send reply schema".into());
+        }
+        id(&self.request_id, "request_id", MAX_ACCOUNT_ID)?;
+        id(&self.account_id, "account_id", MAX_ACCOUNT_ID)?;
+        channel_name(&self.channel)?;
+        if self.accepted && self.rejection.is_some() {
+            return Err("an accepted send cannot carry a rejection".into());
+        }
+        if !self.accepted && self.rejection.is_none() {
+            return Err("a rejected send must name a reason".into());
+        }
+        if let Some(id) = &self.message_id {
+            message_id(id)?;
         }
         Ok(())
     }
@@ -572,6 +656,42 @@ mod tests {
         invalid = delta;
         invalid.valid_until_unix_ms = invalid.observed_at_unix_ms;
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn send_is_separate_and_bounded() {
+        let request = SendRequest {
+            schema_version: SCHEMA_VERSION,
+            request_id: "send-1".into(),
+            account_id: "irc-fleet".into(),
+            channel: "#agents".into(),
+            text_bytes: 5,
+        };
+        request.validate(5).unwrap();
+        assert!(request.validate(4).is_err());
+
+        let accepted = SendResponse {
+            schema_version: SCHEMA_VERSION,
+            request_id: "send-1".into(),
+            account_id: "irc-fleet".into(),
+            channel: "#agents".into(),
+            accepted: true,
+            message_id: None,
+            rejection: None,
+        };
+        accepted.validate().unwrap();
+        let rejected = SendResponse {
+            accepted: false,
+            rejection: Some(SendRejection::NotAuthorized),
+            ..accepted
+        };
+        rejected.validate().unwrap();
+        let inconsistent = SendResponse {
+            accepted: false,
+            rejection: None,
+            ..rejected
+        };
+        assert!(inconsistent.validate().is_err());
     }
 
     #[test]

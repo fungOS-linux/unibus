@@ -1,0 +1,40 @@
+{
+  "bus": {
+    "installation_id": "home",
+    "producer_id": "mail-gmail",
+    "hub_endpoint": "127.0.0.1:18790",
+    "token_file": "mail-gmail.token",
+    "zones": ["home-lan"],
+    "capabilities": ["mail.bridge"],
+    "screen_anchors": [],
+    "schema_version": 2,
+    "read_timeout_ms": 10000
+  },
+  "account": {
+    "schema_version": 1,
+    "account_id": "mail-gmail",
+    "protocol": "imap",
+    "host": "imap.gmail.com",
+    "port": 993,
+    "tls": true,
+    "username": "avery@example.com",
+    "credential_ref": "geode://oauth/google.avery/refresh",
+    "folders": ["INBOX"],
+    "poll_interval_ms": 30000,
+    "capabilities": {
+      "push": false,
+      "folders": true,
+      "flags": true,
+      "delete": true,
+      "uidl": false
+    }
+  },
+  "publish_metadata": false,
+  "batch_size": 64,
+  "initial_max": 64,
+  "oauth": {
+    "client_id": "REPLACE.apps.googleusercontent.com",
+    "client_secret_ref": "geode://oauth/google.avery/client-secret",
+    "token_endpoint": "https://oauth2.googleapis.com/token"
+  }
+}

@@ -297,16 +297,26 @@ impl ImapSession {
         resolver: &dyn CredentialResolver,
         publish_metadata: bool,
     ) -> Result<Self> {
-        account.validate().map_err(anyhow::Error::msg)?;
-        ensure!(
-            account.protocol == Protocol::Imap,
-            "unibus-mail-imap only accepts IMAP accounts"
-        );
         let auth = if account.credential_ref.is_empty() {
             MailAuth::Password(String::new())
         } else {
             resolver.resolve(&account.credential_ref).await?
         };
+        Self::connect_with_auth(account, auth, publish_metadata).await
+    }
+
+    /// Connect with an already-resolved authentication secret. This is the seam
+    /// for a Gmail OAuth refresh performed by the host or binary.
+    pub async fn connect_with_auth(
+        account: Account,
+        auth: MailAuth,
+        publish_metadata: bool,
+    ) -> Result<Self> {
+        account.validate().map_err(anyhow::Error::msg)?;
+        ensure!(
+            account.protocol == Protocol::Imap,
+            "unibus-mail-imap only accepts IMAP accounts"
+        );
         let stream = if account.tls {
             tls_connect(&account.host, account.port).await?
         } else {

@@ -19,10 +19,16 @@ It registers with `mail.bridge`, publishes `email.account.v1` once, polls each
 configured folder on the account cadence, and answers `email.fetch.v1` with a
 bounded raw message (`message/rfc822`).
 
-Current binary limitation: `env://NAME` credentials only. `geode://` references
-need a host process with the geode client; `ImapSession::connect` already takes
-any `CredentialResolver`, including one that returns `MailAuth::XOAuth2` for
-Gmail.
+Credentials resolve through `unibus-credentials`: `env://NAME` directly, and
+`geode://realm/account/slot` through the environment variable geode's
+`EnvBackend` uses (`GEODE_REALM_ACCOUNT_SLOT`). That is the only geode backend
+reachable without a host IPC boundary today; a `geoded` client can replace the
+module without changing configuration.
+
+Gmail uses the `oauth` block: `account.credential_ref` names the refresh token,
+`oauth.client_secret_ref` names the client secret, and the adapter refreshes an
+access token before each connect (`MailAuth::XOAuth2`). See
+[`mail-gmail.md`](mail-gmail.md).
 
 ## Scope
 

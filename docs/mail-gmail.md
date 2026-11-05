@@ -26,7 +26,7 @@ Settings:
   "port": 993,
   "tls": true,
   "username": "you@gmail.com",
-  "credential_ref": "geode://oauth/google/you/access"
+  "credential_ref": "geode://oauth/google.you/access"
 }
 ```
 
@@ -46,7 +46,9 @@ Token lifecycle:
 1. Create a Google Cloud project and an OAuth **Desktop app** client.
 2. Authorize once on a trusted machine with a loopback redirect.
 3. Put the refresh token in geode:
-   `geode://oauth/google/<account>/refresh` with purpose `oauth2.refresh`.
+   `geode://oauth/google.<account>/refresh` with purpose `oauth2.refresh`.
+   The reference has exactly three components; use a dotted account
+   (`google.avery`), not a fourth path segment.
 4. The host resolver leases an access token from `geode-oauth` (refreshing when
    needed) and returns `MailAuth::XOAuth2(token)` to `unibus-mail-imap`.
 5. The adapter never sees the refresh token and never caches the access token.
@@ -108,6 +110,29 @@ Decide the identity field before writing the API adapter.
   accept the restricted-scope review later.
 - Headless hosts: authorize on a laptop, store only the refresh token in geode;
   the host never needs a browser.
+
+## Google Workspace
+
+Yes, Workspace accounts work through the same IMAP + OAuth2 path, with two
+admin switches:
+
+1. **Enable IMAP** in the Admin console: Apps → Google Workspace → Gmail →
+   End User Access → IMAP access. If the domain disables IMAP, XOAUTH2 login
+   fails even with a valid token.
+2. **Allow the OAuth client**: an **Internal** app is limited to the Workspace
+   org and skips public verification. The scope is still
+   `https://mail.google.com/` for IMAP.
+
+Usernames are the full Workspace address (`avery@example.com`); the IMAP host is
+still `imap.gmail.com`. Delegated/shared mailboxes are not supported in v1: run
+one bridge config and one producer per mailbox. If Workspace policy forbids
+IMAP or full-scope OAuth, use the Gmail API adapter instead.
+
+The example config is `config/mail-gmail-imap.example.json`. With the env-backed
+geode mapping, the refresh token and client secret come from
+`GEODE_OAUTH_GOOGLE_AVERY_REFRESH` and
+`GEODE_OAUTH_GOOGLE_AVERY_CLIENT_SECRET` until a real geode backend/IPC is
+wired.
 
 ## Recommendation
 

@@ -4,8 +4,12 @@
     "producer_id": "irc-fleet",
     "hub_endpoint": "127.0.0.1:18790",
     "token_file": "irc-fleet.token",
-    "zones": ["home-lan"],
-    "capabilities": ["chat.bridge"],
+    "zones": [
+      "home-lan"
+    ],
+    "capabilities": [
+      "chat.bridge"
+    ],
     "screen_anchors": [],
     "schema_version": 2,
     "read_timeout_ms": 10000
@@ -20,7 +24,10 @@
     "tls": true,
     "nick": "mycelium",
     "credential_ref": "env://IRC_FLEET_PASSWORD",
-    "channels": ["#agents", "#ops"],
+    "channels": [
+      "#agents",
+      "#ops"
+    ],
     "reconnect_interval_ms": 15000,
     "capabilities": {
       "push": true,
@@ -30,5 +37,9 @@
     }
   },
   "ring_messages": 1024,
-  "ring_bytes": 8388608
+  "ring_bytes": 8388608,
+  "send": {
+    "enabled": false,
+    "allowed_producers": []
+  }
 }

@@ -63,15 +63,40 @@ token; the adapter never logs it and never stores it in the session struct.
 Do not put a bridge appservice token or Matrix access token in the IRC path. The
 IRC adapter speaks IRC; Beeper/Matrix gets its own adapter.
 
-## Grants
+## Grants: read and send are separate
 
 Keep capabilities separate:
 
 - `chat.metadata` — receive account/message/delta events.
 - `chat.fetch` — request retained text for a known message.
-- future `chat.send` — never part of the read-only adapter.
+- `chat.send` — publish `chat.send.v1` and make the adapter send upstream.
 
-Discovery of a chat service is not authorization to read it.
+**Read never implies send.** A producer granted `chat.metadata` and
+`chat.fetch` cannot send. `chat.send.v1` is a distinct message kind, so the
+hub's `publishes` grant can authorize it independently.
+
+Sending is off by default and needs all of:
+
+1. `send.enabled = true` in the adapter config;
+2. the producer id in `send.allowed_producers`;
+3. `chat.send` in the adapter's bus capabilities;
+4. a hub grant that lets that caller publish `chat.send.v1` to this adapter.
+
+The adapter advertises `capabilities.send = false` unless enabled. Rejected
+sends return `chat.send.reply.v1` with a closed `SendRejection` reason. Text
+travels in the binary payload, is bounded, and is never logged.
+
+## Outbound send
+
+`chat.send.v1` carries `{request_id, account_id, channel, text_bytes}`; the
+UTF-8 text is the binary payload. The adapter checks the producer allowlist,
+channel allowlist, size bound, and transport result before replying. The echoed
+message comes back through the normal read path, so it is retained and
+fetchable like any other message.
+
+This is still not an approval workflow. If a deployment needs two-person
+approval or a time-bound escalation, put it in front of `chat.send.v1`; the
+adapter only enforces the explicit grant.
 
 ## Configuration shape
 

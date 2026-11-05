@@ -20,7 +20,8 @@ use unibus::Message;
 use unibus::client::{Client, ClientConfig};
 use unibus_chat::{
     ACCOUNT_KIND, Account, DELTA_KIND, Delta, FETCH_KIND, FETCH_REPLY_KIND, FetchRequest,
-    FetchResponse, SCHEMA_VERSION,
+    FetchResponse, MAX_SEND_BYTES, SCHEMA_VERSION, SEND_KIND, SEND_REPLY_KIND, SendRejection,
+    SendRequest, SendResponse,
 };
 use unibus_irc::{BodyRing, IrcEvent, IrcSession};
 
@@ -36,6 +37,20 @@ struct BridgeConfig {
     ring_messages: usize,
     #[serde(default = "default_ring_bytes")]
     ring_bytes: usize,
+    /// Sending is disabled unless the host explicitly opts in. The read path
+    /// never checks this and never gains send authority from metadata/fetch.
+    #[serde(default)]
+    send: SendConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SendConfig {
+    #[serde(default)]
+    enabled: bool,
+    /// Exact producer ids allowed to publish `chat.send.v1` to this adapter.
+    #[serde(default)]
+    allowed_producers: Vec<String>,
 }
 
 fn default_ring_messages() -> usize {
@@ -52,9 +67,27 @@ async fn main() -> Result<()> {
         .nth(1)
         .context("usage: unibus-irc <bridge.json>")?;
     let bytes = std::fs::read(&path).with_context(|| format!("read config {path}"))?;
-    let config: BridgeConfig =
+    let mut config: BridgeConfig =
         serde_json::from_slice(&bytes).with_context(|| format!("parse config {path}"))?;
     config.account.validate().map_err(anyhow::Error::msg)?;
+    if config.send.enabled {
+        ensure!(
+            !config.send.allowed_producers.is_empty(),
+            "send.enabled requires an explicit allowed_producers allowlist"
+        );
+        ensure!(
+            config
+                .bus
+                .capabilities
+                .iter()
+                .any(|capability| capability == "chat.send"),
+            "send.enabled requires the chat.send bus capability"
+        );
+        config.account.capabilities.send = true;
+    } else {
+        // Never advertise send authority that the adapter will not honor.
+        config.account.capabilities.send = false;
+    }
     ensure!(
         config.ring_messages > 0 && config.ring_bytes > 0,
         "ring bounds must be positive"
@@ -139,12 +172,21 @@ async fn run(client: &Client, config: &BridgeConfig) -> Result<()> {
             }
             _ = tokio::time::sleep(BUS_POLL) => {}
         }
-        drain_bus(client, config, &ring)?;
+        drain_bus(client, config, &mut session, &ring).await?;
     }
 }
 
-fn drain_bus(client: &Client, config: &BridgeConfig, ring: &BodyRing) -> Result<()> {
-    while let Some((envelope, _)) = client.try_read()? {
+async fn drain_bus(
+    client: &Client,
+    config: &BridgeConfig,
+    session: &mut IrcSession<IrcStream>,
+    ring: &BodyRing,
+) -> Result<()> {
+    while let Some((envelope, payload)) = client.try_read()? {
+        if envelope.message.kind == SEND_KIND {
+            handle_send(client, config, session, &envelope, &payload).await?;
+            continue;
+        }
         if envelope.message.kind != FETCH_KIND {
             continue;
         }
@@ -207,19 +249,115 @@ fn drain_bus(client: &Client, config: &BridgeConfig, ring: &BodyRing) -> Result<
     Ok(())
 }
 
-fn resolve_secret(reference: &str) -> Result<Option<String>> {
-    if reference.is_empty() {
-        return Ok(None);
-    }
-    let Some(name) = reference.strip_prefix("env://") else {
-        bail!(
-            "unibus-irc supports env:// credentials only; {reference} needs a host geode resolver"
-        );
+async fn handle_send(
+    client: &Client,
+    config: &BridgeConfig,
+    session: &mut IrcSession<IrcStream>,
+    envelope: &unibus::Envelope,
+    payload: &[u8],
+) -> Result<()> {
+    let reject = |request_id: String, channel: String, reason: SendRejection| SendResponse {
+        schema_version: SCHEMA_VERSION,
+        request_id,
+        account_id: config.account.account_id.clone(),
+        channel,
+        accepted: false,
+        message_id: None,
+        rejection: Some(reason),
     };
-    let value = std::env::var(name)
-        .with_context(|| format!("read credential environment variable {name}"))?;
-    ensure!(!value.is_empty(), "IRC credential is empty");
-    Ok(Some(value))
+    if !config.send.enabled {
+        eprintln!("unibus-irc: rejected send: adapter send is disabled");
+        return Ok(());
+    }
+    if !config
+        .send
+        .allowed_producers
+        .iter()
+        .any(|producer| producer == &envelope.producer_id)
+    {
+        eprintln!(
+            "unibus-irc: rejected send from unlisted producer {}",
+            envelope.producer_id
+        );
+        return Ok(());
+    }
+    let value = serde_json::Value::Object(envelope.message.body.clone());
+    let request: SendRequest = match serde_json::from_value(value) {
+        Ok(request) => request,
+        Err(error) => {
+            eprintln!("unibus-irc: invalid send request: {error}");
+            return Ok(());
+        }
+    };
+    if request.account_id != config.account.account_id {
+        return Ok(());
+    }
+    let response = match request.validate(payload.len()) {
+        Ok(()) => {
+            let Ok(text) = std::str::from_utf8(payload) else {
+                let response = reject(
+                    request.request_id,
+                    request.channel,
+                    SendRejection::Malformed,
+                );
+                response.validate().map_err(anyhow::Error::msg)?;
+                reply(
+                    client,
+                    &envelope.producer_id,
+                    SEND_REPLY_KIND,
+                    &response,
+                    &[],
+                )?;
+                return Ok(());
+            };
+            if !config.account.has_channel(&request.channel) {
+                reject(
+                    request.request_id,
+                    request.channel,
+                    SendRejection::UnknownChannel,
+                )
+            } else if let Err(error) = session.send_message(&request.channel, text).await {
+                eprintln!("unibus-irc: send failed: {error:#}");
+                reject(
+                    request.request_id,
+                    request.channel,
+                    SendRejection::Transport,
+                )
+            } else {
+                SendResponse {
+                    schema_version: SCHEMA_VERSION,
+                    request_id: request.request_id,
+                    account_id: config.account.account_id.clone(),
+                    channel: request.channel,
+                    accepted: true,
+                    message_id: None,
+                    rejection: None,
+                }
+            }
+        }
+        Err(error) => {
+            let reason = if request.text_bytes > MAX_SEND_BYTES {
+                SendRejection::TooLarge
+            } else {
+                SendRejection::Malformed
+            };
+            eprintln!("unibus-irc: rejected send request: {error}");
+            reject(request.request_id, request.channel, reason)
+        }
+    };
+    response.validate().map_err(anyhow::Error::msg)?;
+    reply(
+        client,
+        &envelope.producer_id,
+        SEND_REPLY_KIND,
+        &response,
+        &[],
+    )?;
+    Ok(())
+}
+
+fn resolve_secret(reference: &str) -> Result<Option<String>> {
+    unibus_credentials::resolve(reference)
 }
 
 fn publish<T: serde::Serialize>(client: &Client, kind: &str, body: &T) -> Result<()> {

@@ -18,7 +18,7 @@ use unibus_mail::{
     ACCOUNT_KIND, Account, Capabilities, DELTA_KIND, Delta, FETCH_KIND, FETCH_REPLY_KIND,
     FetchRequest, FetchResponse, Protocol, SCHEMA_VERSION,
 };
-use unibus_mail_imap::{EnvResolver, ImapSession};
+use unibus_mail_imap::{ImapSession, MailAuth};
 
 const BUS_POLL: Duration = Duration::from_millis(100);
 const DELTA_LEASE_MS: u64 = 60_000;
@@ -34,6 +34,23 @@ struct BridgeConfig {
     batch_size: usize,
     #[serde(default = "default_initial_max")]
     initial_max: u64,
+    /// When present, `account.credential_ref` names the OAuth refresh token and
+    /// the adapter obtains a short-lived access token before every connect.
+    #[serde(default)]
+    oauth: Option<OAuthConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OAuthConfig {
+    client_id: String,
+    client_secret_ref: String,
+    #[serde(default = "default_token_endpoint")]
+    token_endpoint: String,
+}
+
+fn default_token_endpoint() -> String {
+    "https://oauth2.googleapis.com/token".into()
 }
 
 fn default_batch() -> usize {
@@ -93,12 +110,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run(client: &Client, config: &BridgeConfig) -> Result<()> {
-    let mut session = ImapSession::connect(
-        config.account.clone(),
-        &EnvResolver,
-        config.publish_metadata,
-    )
-    .await?;
+    let mut session = connect_session(config).await?;
     let mut last_uid: BTreeMap<String, u64> = BTreeMap::new();
     let mut generation: BTreeMap<String, u64> = BTreeMap::new();
 
@@ -263,6 +275,57 @@ fn drain_bus(client: &Client, config: &BridgeConfig, session: &mut ImapSession) 
         )?;
     }
     Ok(())
+}
+
+async fn connect_session(config: &BridgeConfig) -> Result<ImapSession> {
+    let auth = if let Some(oauth) = &config.oauth {
+        ensure!(
+            !config.account.credential_ref.is_empty(),
+            "Gmail OAuth needs account.credential_ref to name the refresh token"
+        );
+        let refresh = unibus_credentials::resolve(&config.account.credential_ref)?
+            .context("refresh token reference resolved to nothing")?;
+        let client_secret = unibus_credentials::resolve(&oauth.client_secret_ref)?
+            .context("client secret reference resolved to nothing")?;
+        let access = refresh_access_token(oauth, &refresh, &client_secret).await?;
+        MailAuth::XOAuth2(access)
+    } else {
+        MailAuth::Password(
+            unibus_credentials::resolve(&config.account.credential_ref)?.unwrap_or_default(),
+        )
+    };
+    ImapSession::connect_with_auth(config.account.clone(), auth, config.publish_metadata).await
+}
+
+async fn refresh_access_token(
+    oauth: &OAuthConfig,
+    refresh_token: &str,
+    client_secret: &str,
+) -> Result<String> {
+    let response = reqwest::Client::new()
+        .post(&oauth.token_endpoint)
+        .form(&[
+            ("client_id", oauth.client_id.as_str()),
+            ("client_secret", client_secret),
+            ("refresh_token", refresh_token),
+            ("grant_type", "refresh_token"),
+        ])
+        .send()
+        .await
+        .context("reach OAuth token endpoint")?;
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap_or_default();
+    if !status.is_success() {
+        let error = body
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        bail!("OAuth token refresh failed: HTTP {status} ({error})");
+    }
+    body.get("access_token")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
+        .context("OAuth token response has no access_token")
 }
 
 fn folders(account: &Account) -> Vec<String> {
