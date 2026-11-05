@@ -7,6 +7,23 @@ loop that publishes to Unibus and serves fetch requests is the next slice.
 Gmail is the same engine with XOAUTH2; see [`mail-gmail.md`](mail-gmail.md) for
 the scope trade-off between IMAP and the Gmail API.
 
+## Running the bridge
+
+`unibus-mail-imap` is the publisher loop:
+
+```sh
+unibus-mail-imap config/mail-imap-bridge.example.json
+```
+
+It registers with `mail.bridge`, publishes `email.account.v1` once, polls each
+configured folder on the account cadence, and answers `email.fetch.v1` with a
+bounded raw message (`message/rfc822`).
+
+Current binary limitation: `env://NAME` credentials only. `geode://` references
+need a host process with the geode client; `ImapSession::connect` already takes
+any `CredentialResolver`, including one that returns `MailAuth::XOAuth2` for
+Gmail.
+
 ## Scope
 
 The bridge is a read-only mail ingest path into Unibus:

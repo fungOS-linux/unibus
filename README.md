@@ -82,14 +82,15 @@ authorized `email.fetch.v1` request and is never broadcast. Credentials are
 named as `geode://...` references and resolved only by the local owner. See
 [`docs/mail-bridge-runbook.md`](docs/mail-bridge-runbook.md).
 
-`crates/unibus-mail-imap` — the IMAP owner adapter. It owns the TLS session,
+`crates/unibus-mail-imap` — the IMAP owner adapter and `unibus-mail-imap`
+publisher. It owns the TLS session,
 fetches metadata-only windows with `UIDVALIDITY`/`UID` identity, answers bounded
 `email.fetch.v1` requests with `BODY.PEEK[]`, and supports `LOGIN` plus XOAUTH2
 (needed for Gmail and other OAuth2 providers). See
 [`docs/mail-gmail.md`](docs/mail-gmail.md).
 
 `crates/unibus-chat` and `crates/unibus-irc` — chat contracts and the first
-transport. The IRC adapter negotiates `message-tags`/`server-time`, uses IRCv3
+transport, including the `unibus-irc` publisher. The IRC adapter negotiates `message-tags`/`server-time`, uses IRCv3
 `msgid` when present and an explicitly local identity otherwise, and keeps a
 bounded in-memory text ring so `chat.fetch.v1` never broadcasts message bodies.
 See [`docs/chat-bridge-runbook.md`](docs/chat-bridge-runbook.md).

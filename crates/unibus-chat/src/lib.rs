@@ -337,6 +337,14 @@ pub struct FetchResponse {
     pub content_type: String,
     pub size_bytes: u64,
     pub truncated: bool,
+    /// False when the adapter no longer retains the text (ring eviction or a
+    /// restart). A not-retained reply never carries bytes.
+    #[serde(default = "default_true")]
+    pub retained: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl FetchResponse {
@@ -362,6 +370,9 @@ impl FetchResponse {
         }
         if self.size_bytes > MAX_FETCH_BYTES {
             return Err("fetch reply exceeds its bound".into());
+        }
+        if !self.retained && self.size_bytes != 0 {
+            return Err("a not-retained reply cannot carry bytes".into());
         }
         Ok(())
     }
@@ -574,6 +585,7 @@ mod tests {
             content_type: "text/plain; charset=utf-8".into(),
             size_bytes: 5,
             truncated: false,
+            retained: true,
         };
         response.validate(5).unwrap();
         assert!(response.validate(4).is_err());

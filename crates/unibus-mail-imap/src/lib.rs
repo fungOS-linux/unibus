@@ -112,6 +112,12 @@ impl CredentialResolver for OAuthTokenResolver {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FetchedBody {
+    pub bytes: Vec<u8>,
+    pub truncated: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MailboxState {
     pub uidvalidity: u64,
@@ -398,7 +404,12 @@ impl ImapSession {
 
     /// Fetch a bounded body. The adapter truncates at `max_bytes`; callers that
     /// need exact MIME boundaries must request a part from a content service.
-    pub async fn fetch_body(&mut self, mailbox: &str, uid: u64, max_bytes: u64) -> Result<Vec<u8>> {
+    pub async fn fetch_body(
+        &mut self,
+        mailbox: &str,
+        uid: u64,
+        max_bytes: u64,
+    ) -> Result<FetchedBody> {
         ensure!(uid > 0, "UID must be positive");
         ensure!(
             (1..=unibus_mail::MAX_FETCH_BYTES).contains(&max_bytes),
@@ -415,7 +426,11 @@ impl ImapSession {
         };
         let body = fetch.body().context("IMAP response had no body section")?;
         let limit = usize::try_from(max_bytes).unwrap_or(usize::MAX);
-        Ok(body[..body.len().min(limit)].to_vec())
+        let truncated = body.len() > limit;
+        Ok(FetchedBody {
+            bytes: body[..body.len().min(limit)].to_vec(),
+            truncated,
+        })
     }
 
     pub async fn logout(mut self) -> Result<()> {

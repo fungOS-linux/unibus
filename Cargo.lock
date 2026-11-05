@@ -4733,10 +4733,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "rustls",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-rustls",
+ "unibus",
  "unibus-chat",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -4789,6 +4793,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-rustls",
+ "unibus",
  "unibus-mail",
  "webpki-roots",
 ]

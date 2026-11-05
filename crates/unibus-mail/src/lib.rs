@@ -18,6 +18,7 @@ pub const ACCOUNT_KIND: &str = "email.account.v1";
 pub const MESSAGE_KIND: &str = "email.message.v1";
 pub const DELTA_KIND: &str = "email.delta.v1";
 pub const FETCH_KIND: &str = "email.fetch.v1";
+pub const FETCH_REPLY_KIND: &str = "email.fetch.reply.v1";
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_ACCOUNT_ID: usize = 128;
@@ -356,6 +357,62 @@ impl FetchRequest {
         }
         if self.max_bytes == 0 || self.max_bytes > MAX_FETCH_BYTES {
             return Err("max_bytes is outside its bounds".into());
+        }
+        Ok(())
+    }
+}
+
+/// Reply to an [`FetchRequest`]. The bounded content travels in the Unibus
+/// binary payload, never inside this JSON document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FetchResponse {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub account_id: String,
+    pub mailbox: String,
+    pub uid: u64,
+    /// v1 returns the bounded raw message (`message/rfc822`) rather than
+    /// parsing MIME parts.
+    pub content_type: String,
+    pub size_bytes: u64,
+    pub truncated: bool,
+    #[serde(default = "default_true")]
+    pub retained: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl FetchResponse {
+    pub fn validate(&self, payload_len: usize) -> Result<(), String> {
+        if self.schema_version != SCHEMA_VERSION {
+            return Err("unsupported fetch reply schema".into());
+        }
+        id(&self.request_id, "request_id", MAX_ACCOUNT_ID)?;
+        id(&self.account_id, "account_id", MAX_ACCOUNT_ID)?;
+        mailbox(&self.mailbox)?;
+        if self.uid == 0 {
+            return Err("uid must be positive".into());
+        }
+        if self.content_type.is_empty()
+            || self.content_type.len() > 64
+            || !self
+                .content_type
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+        {
+            return Err("invalid content_type".into());
+        }
+        if self.size_bytes != payload_len as u64 {
+            return Err("size_bytes does not match the payload".into());
+        }
+        if self.size_bytes > MAX_FETCH_BYTES {
+            return Err("fetch reply exceeds its bound".into());
+        }
+        if !self.retained && self.size_bytes != 0 {
+            return Err("a not-retained reply cannot carry bytes".into());
         }
         Ok(())
     }

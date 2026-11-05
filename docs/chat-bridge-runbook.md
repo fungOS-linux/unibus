@@ -100,10 +100,25 @@ Discovery of a chat service is not authorization to read it.
 `channels` is an allowlist. A message for an unlisted channel is ignored, even if
 the server delivers it. Never enumerate or join server-wide.
 
+## Running the bridge
+
+`unibus-irc` is the publisher loop:
+
+```sh
+unibus-irc config/irc-bridge.example.json
+```
+
+It registers as `producer_id`, advertises `chat.bridge`, publishes
+`chat.account.v1` once, then one delta per observed message. It polls the bus
+every 100 ms for `chat.fetch.v1` and replies to the requester only.
+
+Current binary limitation: it resolves `env://NAME` credentials. A `geode://`
+reference needs a host process with the geode client; the library already takes
+any `CredentialResolver`, so the daemon wiring is a small follow-up.
+
 ## Next slices
 
-1. Publisher loop: connect, publish `chat.account.v1`, emit deltas, answer
-   `chat.fetch.v1` from the ring via the Unibus client.
-2. IRCv3 SASL PLAIN/EXTERNAL for networks that require it.
-3. Outbound `chat.send.v1` with explicit write grant and echo suppression.
+1. IRCv3 SASL PLAIN/EXTERNAL for networks that require it.
+2. Outbound `chat.send.v1` with explicit write grant and echo suppression.
+3. Host geode resolver for the binary (no `env://` requirement).
 4. Beeper/Matrix adapter behind the same `chat.*` contracts.

@@ -1,0 +1,34 @@
+{
+  "bus": {
+    "installation_id": "home",
+    "producer_id": "irc-fleet",
+    "hub_endpoint": "127.0.0.1:18790",
+    "token_file": "irc-fleet.token",
+    "zones": ["home-lan"],
+    "capabilities": ["chat.bridge"],
+    "screen_anchors": [],
+    "schema_version": 2,
+    "read_timeout_ms": 10000
+  },
+  "account": {
+    "schema_version": 1,
+    "account_id": "irc-fleet",
+    "transport": "irc",
+    "network": "fleet",
+    "host": "irc.example.net",
+    "port": 6697,
+    "tls": true,
+    "nick": "mycelium",
+    "credential_ref": "env://IRC_FLEET_PASSWORD",
+    "channels": ["#agents", "#ops"],
+    "reconnect_interval_ms": 15000,
+    "capabilities": {
+      "push": true,
+      "history": false,
+      "send": true,
+      "server_ids": true
+    }
+  },
+  "ring_messages": 1024,
+  "ring_bytes": 8388608
+}
