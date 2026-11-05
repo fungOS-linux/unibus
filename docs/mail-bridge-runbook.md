@@ -49,7 +49,10 @@ never reads a message body.
 | `email.account.v1` | adapter → bus | Protocol, host/port/TLS, non-secret login, `geode://` credential reference, allowed folders, poll cadence, negotiated capabilities. |
 | `email.message.v1` | adapter → bus | Stable identity (`uidvalidity` + `uid` or `uidl`), size, received time, flags, optional metadata. No body. |
 | `email.delta.v1` | adapter → bus | One bounded window: generation, cursor, upserts, expunges, lease. |
-| `email.fetch.v1` | authorized caller → adapter | Request for headers/text/html/attachments. The reply goes to that caller only. |
+| `email.fetch.v1` | authorized caller → adapter | Request for raw `message/rfc822` content, bounded by `max_bytes`. |
+| `email.fetch.reply.v1` | adapter → caller | Metadata plus raw message bytes in the binary payload; never broadcast. |
+| `email.content.v1` | authorized caller → adapter | Request one body part: headers, plain text, or HTML. |
+| `email.content.reply.v1` | adapter → caller | Metadata plus the decoded UTF-8 body in the binary payload; attachments are not returned. |
 
 `Message` uses IMAP `UIDVALIDITY` + `UID` as identity, not `Message-ID`, which a
 sender can forge or duplicate. POP3 uses UIDL when available and always keeps a
@@ -87,8 +90,14 @@ Never publish:
 - credentials, tokens, or account passwords;
 - an unbounded mailbox dump.
 
-`email.fetch.v1` requires `mail.fetch` and a bounded `max_bytes`. The adapter
-must not use fetch results as bus publications.
+`email.fetch.v1` and `email.content.v1` require `mail.fetch` and a bounded
+`max_bytes`. The adapter must not use fetch results as bus publications.
+
+`email.content.v1` parses MIME locally and returns only the requested inline
+part. It skips attachment dispositions, decodes the transfer encoding and charset
+to UTF-8, and reports `retained=false` when the message has no matching part.
+Attachments remain a separate contract so a body fetch cannot silently become a
+bulk attachment export.
 
 ## Authorization and lifecycle
 

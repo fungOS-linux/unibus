@@ -19,7 +19,9 @@ use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
-use unibus_mail::{Account, Capabilities, Delta, Message, Metadata, Protocol, SCHEMA_VERSION};
+use unibus_mail::{
+    Account, Capabilities, ContentPart, Delta, Message, Metadata, Protocol, SCHEMA_VERSION,
+};
 
 /// Metadata-only fetch query. No body section is requested.
 const METADATA_QUERY: &str = "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE)";
@@ -115,6 +117,13 @@ impl CredentialResolver for OAuthTokenResolver {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FetchedBody {
     pub bytes: Vec<u8>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FetchedContent {
+    pub bytes: Vec<u8>,
+    pub content_type: &'static str,
     pub truncated: bool,
 }
 
@@ -443,10 +452,69 @@ impl ImapSession {
         })
     }
 
+    /// Fetch one bounded MIME body part without exposing the whole message.
+    ///
+    /// The adapter parses MIME locally, skips attachment dispositions, and
+    /// returns only the requested text/plain, text/html or header block. Raw
+    /// attachment bytes never enter this reply.
+    pub async fn fetch_content(
+        &mut self,
+        mailbox: &str,
+        uid: u64,
+        part: ContentPart,
+        max_bytes: u64,
+    ) -> Result<FetchedContent> {
+        ensure!(uid > 0, "UID must be positive");
+        ensure!(
+            (1..=unibus_mail::MAX_FETCH_BYTES).contains(&max_bytes),
+            "max_bytes is outside its bounds"
+        );
+        let raw = self
+            .fetch_body(mailbox, uid, unibus_mail::MAX_FETCH_BYTES)
+            .await?;
+        let parsed = mailparse::parse_mail(&raw.bytes).context("parse MIME message")?;
+        let limit = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+        let (bytes, content_type) = match part {
+            ContentPart::Headers => {
+                let mut headers = parsed.get_headers().get_raw_bytes().to_vec();
+                headers.push(b'\n');
+                (headers, ContentPart::Headers.content_type())
+            }
+            ContentPart::Text => find_mime_body(&parsed, "text/plain")
+                .and_then(|mail| mail.get_body().ok())
+                .map(|body| (body.into_bytes(), ContentPart::Text.content_type()))
+                .unwrap_or_else(|| (Vec::new(), ContentPart::Text.content_type())),
+            ContentPart::Html => find_mime_body(&parsed, "text/html")
+                .and_then(|mail| mail.get_body().ok())
+                .map(|body| (body.into_bytes(), ContentPart::Html.content_type()))
+                .unwrap_or_else(|| (Vec::new(), ContentPart::Html.content_type())),
+        };
+        let truncated = raw.truncated || bytes.len() > limit;
+        Ok(FetchedContent {
+            bytes: bytes[..bytes.len().min(limit)].to_vec(),
+            content_type,
+            truncated,
+        })
+    }
+
     pub async fn logout(mut self) -> Result<()> {
         self.session.logout().await?;
         Ok(())
     }
+}
+
+fn find_mime_body<'a>(
+    mail: &'a mailparse::ParsedMail<'a>,
+    mimetype: &str,
+) -> Option<&'a mailparse::ParsedMail<'a>> {
+    if mail.ctype.mimetype.eq_ignore_ascii_case(mimetype)
+        && mail.get_content_disposition().disposition != mailparse::DispositionType::Attachment
+    {
+        return Some(mail);
+    }
+    mail.subparts
+        .iter()
+        .find_map(|part| find_mime_body(part, mimetype))
 }
 
 fn fetched_meta(fetch: &Fetch) -> Option<FetchedMeta> {
@@ -641,6 +709,30 @@ mod tests {
         );
         assert!(resolver.resolve("geode://mail/work/imap").await.is_err());
         unsafe { std::env::remove_var(name) };
+    }
+
+    #[test]
+    fn mime_body_finder_prefers_inline_parts_and_skips_attachments() {
+        let raw = b"Content-Type: multipart/alternative; boundary=mailbound\r\n\r\n\
+--mailbound\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nhello\r\n\
+--mailbound\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<b>hello</b>\r\n\
+--mailbound\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename=note.txt\r\n\r\nattached\r\n\
+--mailbound--\r\n";
+        let parsed = mailparse::parse_mail(raw).unwrap();
+        assert_eq!(
+            find_mime_body(&parsed, "text/plain")
+                .unwrap()
+                .get_body()
+                .unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            find_mime_body(&parsed, "text/html")
+                .unwrap()
+                .get_body()
+                .unwrap(),
+            "<b>hello</b>"
+        );
     }
 
     #[test]

@@ -19,6 +19,8 @@ pub const MESSAGE_KIND: &str = "email.message.v1";
 pub const DELTA_KIND: &str = "email.delta.v1";
 pub const FETCH_KIND: &str = "email.fetch.v1";
 pub const FETCH_REPLY_KIND: &str = "email.fetch.reply.v1";
+pub const CONTENT_KIND: &str = "email.content.v1";
+pub const CONTENT_REPLY_KIND: &str = "email.content.reply.v1";
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_ACCOUNT_ID: usize = 128;
@@ -418,6 +420,108 @@ impl FetchResponse {
     }
 }
 
+/// A body part a caller may request without receiving the whole raw message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentPart {
+    Headers,
+    Text,
+    Html,
+}
+
+impl ContentPart {
+    pub const fn content_type(self) -> &'static str {
+        match self {
+            Self::Headers => "text/rfc822-headers; charset=utf-8",
+            Self::Text => "text/plain; charset=utf-8",
+            Self::Html => "text/html; charset=utf-8",
+        }
+    }
+}
+
+/// Ask the owner adapter for one bounded body part. Attachments are a separate
+/// content contract; this request never carries or returns attachment bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContentRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub account_id: String,
+    pub mailbox: String,
+    pub uid: u64,
+    pub part: ContentPart,
+    pub max_bytes: u64,
+}
+
+impl ContentRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != SCHEMA_VERSION {
+            return Err("unsupported content schema".into());
+        }
+        id(&self.request_id, "request_id", MAX_ACCOUNT_ID)?;
+        id(&self.account_id, "account_id", MAX_ACCOUNT_ID)?;
+        mailbox(&self.mailbox)?;
+        if self.uid == 0 {
+            return Err("uid must be positive".into());
+        }
+        if self.max_bytes == 0 || self.max_bytes > MAX_FETCH_BYTES {
+            return Err("max_bytes is outside its bounds".into());
+        }
+        Ok(())
+    }
+}
+
+/// Reply to a [`ContentRequest`]. The body travels in the Unibus binary payload;
+/// the JSON document contains only bounded metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContentResponse {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub account_id: String,
+    pub mailbox: String,
+    pub uid: u64,
+    pub part: ContentPart,
+    pub content_type: String,
+    pub size_bytes: u64,
+    pub truncated: bool,
+    #[serde(default = "default_true")]
+    pub retained: bool,
+}
+
+impl ContentResponse {
+    pub fn validate(&self, payload_len: usize) -> Result<(), String> {
+        if self.schema_version != SCHEMA_VERSION {
+            return Err("unsupported content reply schema".into());
+        }
+        id(&self.request_id, "request_id", MAX_ACCOUNT_ID)?;
+        id(&self.account_id, "account_id", MAX_ACCOUNT_ID)?;
+        mailbox(&self.mailbox)?;
+        if self.uid == 0 {
+            return Err("uid must be positive".into());
+        }
+        if self.content_type.is_empty()
+            || self.content_type.len() > 64
+            || !self
+                .content_type
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+        {
+            return Err("invalid content_type".into());
+        }
+        if self.size_bytes != payload_len as u64 {
+            return Err("size_bytes does not match the payload".into());
+        }
+        if self.size_bytes > MAX_FETCH_BYTES {
+            return Err("content reply exceeds its bound".into());
+        }
+        if !self.retained && self.size_bytes != 0 {
+            return Err("a not-retained reply cannot carry bytes".into());
+        }
+        Ok(())
+    }
+}
+
 fn id(value: &str, field: &str, max: usize) -> Result<(), String> {
     if value.is_empty()
         || value.len() > max
@@ -685,6 +789,39 @@ mod tests {
     }
 
     #[test]
+    fn content_request_and_reply_are_bounded() {
+        let request = ContentRequest {
+            schema_version: SCHEMA_VERSION,
+            request_id: "content-1".into(),
+            account_id: "work".into(),
+            mailbox: "INBOX".into(),
+            uid: 42,
+            part: ContentPart::Text,
+            max_bytes: 64 * 1024,
+        };
+        request.validate().unwrap();
+        let reply = ContentResponse {
+            schema_version: SCHEMA_VERSION,
+            request_id: request.request_id.clone(),
+            account_id: request.account_id.clone(),
+            mailbox: request.mailbox.clone(),
+            uid: request.uid,
+            part: request.part,
+            content_type: ContentPart::Text.content_type().into(),
+            size_bytes: 12,
+            truncated: false,
+            retained: true,
+        };
+        reply.validate(12).unwrap();
+        assert!(reply.clone().validate(11).is_err());
+        let mut missing = reply;
+        missing.retained = false;
+        missing.size_bytes = 0;
+        assert!(missing.validate(0).is_ok());
+        missing.size_bytes = 12;
+        assert!(missing.validate(12).is_err());
+    }
+
     fn fetch_requests_are_bounded_and_deduplicated() {
         let request = FetchRequest {
             schema_version: SCHEMA_VERSION,

@@ -15,8 +15,9 @@ use serde::Deserialize;
 use unibus::Message;
 use unibus::client::{Client, ClientConfig};
 use unibus_mail::{
-    ACCOUNT_KIND, Account, Capabilities, DELTA_KIND, Delta, FETCH_KIND, FETCH_REPLY_KIND,
-    FetchRequest, FetchResponse, Protocol, SCHEMA_VERSION,
+    ACCOUNT_KIND, Account, CONTENT_KIND, CONTENT_REPLY_KIND, Capabilities, ContentRequest,
+    ContentResponse, DELTA_KIND, Delta, FETCH_KIND, FETCH_REPLY_KIND, FetchRequest, FetchResponse,
+    Protocol, SCHEMA_VERSION,
 };
 use unibus_mail_imap::{ImapSession, MailAuth};
 
@@ -213,6 +214,69 @@ async fn poll_folder(
 
 fn drain_bus(client: &Client, config: &BridgeConfig, session: &mut ImapSession) -> Result<()> {
     while let Some((envelope, _)) = client.try_read()? {
+        if envelope.message.kind == CONTENT_KIND {
+            let value = serde_json::Value::Object(envelope.message.body.clone());
+            let request: ContentRequest = match serde_json::from_value(value) {
+                Ok(request) => request,
+                Err(error) => {
+                    eprintln!("unibus-mail-imap: invalid content request: {error}");
+                    continue;
+                }
+            };
+            if request.account_id != config.account.account_id {
+                continue;
+            }
+            if let Err(error) = request.validate() {
+                eprintln!("unibus-mail-imap: rejected content request: {error}");
+                continue;
+            }
+            let reply = match futures_executor_block_on(session.fetch_content(
+                &request.mailbox,
+                request.uid,
+                request.part,
+                request.max_bytes,
+            )) {
+                Ok(body) => (body, true),
+                Err(error) => {
+                    eprintln!(
+                        "unibus-mail-imap: content {} UID {} failed: {error:#}",
+                        request.mailbox, request.uid
+                    );
+                    (
+                        unibus_mail_imap::FetchedContent {
+                            bytes: Vec::new(),
+                            content_type: request.part.content_type(),
+                            truncated: false,
+                        },
+                        false,
+                    )
+                }
+            };
+            let (body, retained) = reply;
+            let response = ContentResponse {
+                schema_version: SCHEMA_VERSION,
+                request_id: request.request_id,
+                account_id: request.account_id,
+                mailbox: request.mailbox,
+                uid: request.uid,
+                part: request.part,
+                content_type: body.content_type.into(),
+                size_bytes: body.bytes.len() as u64,
+                truncated: body.truncated,
+                retained,
+            };
+            response
+                .validate(body.bytes.len())
+                .map_err(anyhow::Error::msg)?;
+            reply_envelope(
+                client,
+                &envelope.producer_id,
+                CONTENT_REPLY_KIND,
+                &response,
+                &body.bytes,
+            )?;
+            continue;
+        }
         if envelope.message.kind != FETCH_KIND {
             continue;
         }
