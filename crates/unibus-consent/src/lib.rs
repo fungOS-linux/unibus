@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use soil_consent::{Decision, Effect, Preview, Request, Scope};
+use soil_consent::{Decision, Effect, Preview, Request, Scope, client::Client};
 use thiserror::Error;
 use unibus::grants::{NodeGrant, Role};
 
@@ -71,8 +71,24 @@ pub enum Error {
     ZeroLifetime,
     #[error("grant is invalid: {0}")]
     InvalidGrant(String),
+    #[error("consent client: {0}")]
+    Consent(String),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+/// Ask the host consent popup and lower an approval in one call. The caller
+/// should check for an already-valid grant before invoking this.
+pub fn request_node_grant(
+    client: &Client,
+    request: &Request,
+    spec: &NodeGrantSpec,
+    now_unix_s: u64,
+) -> Result<ApprovedNodeGrant, Error> {
+    let decision = client
+        .request(request)
+        .map_err(|error| Error::Consent(error.to_string()))?;
+    approved_node_grant(request, &decision, spec, now_unix_s)
 }
 
 /// Build the grant previewed in `request` only when `decision` allows the exact
