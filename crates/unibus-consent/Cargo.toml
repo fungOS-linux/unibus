@@ -9,6 +9,6 @@ publish = false
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-soil-consent = { git = "https://github.com/fungOS-linux/soil.git", rev = "86779692e21cc9e959c3dc453257363945d7e9aa" }
+soil-consent = { git = "https://github.com/fungOS-linux/soil.git", rev = "1a990f9b28686d1a55555c9a502ab44230f200c9" }
 thiserror = "2"
 unibus = { path = "../unibus" }

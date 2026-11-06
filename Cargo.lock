@@ -4025,7 +4025,7 @@ dependencies = [
 [[package]]
 name = "soil-consent"
 version = "0.1.0"
-source = "git+https://github.com/fungOS-linux/soil.git?rev=86779692e21cc9e959c3dc453257363945d7e9aa#86779692e21cc9e959c3dc453257363945d7e9aa"
+source = "git+https://github.com/fungOS-linux/soil.git?rev=1a990f9b28686d1a55555c9a502ab44230f200c9#1a990f9b28686d1a55555c9a502ab44230f200c9"
 dependencies = [
  "libc",
  "serde",
