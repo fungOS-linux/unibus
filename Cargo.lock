@@ -4023,6 +4023,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-consent"
+version = "0.1.0"
+source = "git+https://github.com/fungOS-linux/soil.git?rev=80abdb3b16946b91c2ada8219427156a26fbe1a6#80abdb3b16946b91c2ada8219427156a26fbe1a6"
+dependencies = [
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "sorted-index-buffer"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4639,6 +4648,18 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "unibus-consent"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "soil-consent",
+ "thiserror 2.0.20",
+ "unibus",
 ]
 
 [[package]]
