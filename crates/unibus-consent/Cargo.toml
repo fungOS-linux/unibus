@@ -1,0 +1,14 @@
+[package]
+name = "unibus-consent"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+soil-consent = { git = "https://github.com/fungOS-linux/soil.git", rev = "1bfe8b1334eea2a8f3a566535a537f57e85acf3f" }
+thiserror = "2"
+unibus = { path = "../unibus" }
