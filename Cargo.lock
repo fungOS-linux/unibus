@@ -4963,6 +4963,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "unibus-room"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "unibus",
+ "unibus-router",
+]
+
+[[package]]
 name = "unibus-router"
 version = "0.1.0"
 dependencies = [

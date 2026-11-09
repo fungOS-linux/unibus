@@ -95,6 +95,12 @@ transport, including the `unibus-irc` publisher. The IRC adapter negotiates `mes
 bounded in-memory text ring so `chat.fetch.v1` never broadcasts message bodies.
 See [`docs/chat-bridge-runbook.md`](docs/chat-bridge-runbook.md).
 
+`crates/unibus-room` — room membership, presence and audio-bus declarations.
+The `unibus-room` binary is a hub with the room plugin installed; `room-probe`
+joins one room from another machine and prints live membership. The service
+keeps no media bytes: audio stays on isochrone/WebRTC adapters. See
+[`docs/room-service.md`](docs/room-service.md).
+
 `crates/unibus-credentials` — shared `env://` and `geode://` resolution for the
 adapters. `geode://realm/account/slot` leases from a running `geoded` Unix
 socket; `GEODE_ENV_FALLBACK=1` selects geode's `EnvBackend` mapping for
