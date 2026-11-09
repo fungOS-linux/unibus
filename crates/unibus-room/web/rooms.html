@@ -447,7 +447,12 @@ function updateStatus() {
 async function sendMessage() {
   const text = composer.value.trim();
   if (!text) return;
-  await postJSON('/api/action', { id: 'send-message', session: SESSION, text });
+  try {
+    await postJSON('/api/action', { id: 'send-message', session: SESSION, text });
+  } catch (error) {
+    status.textContent = String(error.message || error);
+    return;
+  }
   composer.value = '';
   schedule(100);
   setTimeout(refreshState, 140);

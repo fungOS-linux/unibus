@@ -18,19 +18,28 @@ pub mod host;
 pub mod plugin;
 
 pub const JOIN_KIND: &str = "room.join.v1";
+pub const SAY_KIND: &str = "room.say.v1";
 pub const ADDRESS_KIND: &str = "room.address.v1";
 pub const ADDRESSED_KIND: &str = "room.addressed.v1";
 pub const LEAVE_KIND: &str = "room.leave.v1";
 pub const SELF_KIND: &str = "room.self.v1";
 pub const LIST_KIND: &str = "room.list.v1";
 pub const WELCOME_KIND: &str = "room.welcome.v1";
+pub const MESSAGE_KIND: &str = "room.message.v1";
 pub const MEMBER_KIND: &str = "room.member.v1";
 pub const LIST_REPLY_KIND: &str = "room.list.reply.v1";
 pub const ERROR_KIND: &str = "room.error.v1";
 
-/// Every kind this service owns. A client publishes only the four request
-/// kinds; the rest are service-authored.
-pub const REQUEST_KINDS: &[&str] = &[JOIN_KIND, ADDRESS_KIND, LEAVE_KIND, SELF_KIND, LIST_KIND];
+/// Every kind this service owns. A client publishes only the request kinds;
+/// the rest are service-authored.
+pub const REQUEST_KINDS: &[&str] = &[
+    JOIN_KIND,
+    SAY_KIND,
+    ADDRESS_KIND,
+    LEAVE_KIND,
+    SELF_KIND,
+    LIST_KIND,
+];
 
 pub const CAP_MEMBER: &str = "room.member";
 pub const CAP_OWNER: &str = "room.owner";
@@ -44,6 +53,9 @@ pub const MAX_ID: usize = 64;
 pub const MAX_NAME: usize = 64;
 pub const MAX_ERROR: usize = 160;
 pub const MAX_ADDRESS: usize = 1_000;
+pub const MAX_MESSAGE: usize = 2_000;
+/// Ephemeral room chat is bounded; durable text belongs to records.
+pub const MAX_HISTORY: usize = 200;
 pub const MIN_BUFFER_MS: u32 = 10;
 pub const MAX_BUFFER_MS: u32 = 2_000;
 
@@ -178,6 +190,30 @@ pub struct SelfState {
     pub presenter: Option<Presenter>,
 }
 
+/// A member publishing one line of room text. The service stamps the sender
+/// from the authenticated producer id and broadcasts the resulting
+/// [`RoomMessage`] to every member of that room.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Say {
+    pub text: String,
+}
+
+/// A room message as delivered to every current member.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoomMessage {
+    /// Stable within the room's lifetime; used to deduplicate welcome history
+    /// against messages that arrive while a presenter is connecting.
+    pub id: String,
+    pub revision: u64,
+    pub room: String,
+    pub from: String,
+    pub display_name: String,
+    pub text: String,
+    pub sent_at_ms: u64,
+}
+
 /// A member asking the room service to hand one addressed turn to an agent.
 ///
 /// The request carries text, not audio. The agent decides whether to speak and
@@ -221,6 +257,10 @@ pub struct Welcome {
     /// Every member, including `self`.
     pub members: Vec<Member>,
     pub buses: Vec<Bus>,
+    /// Recent room chat, oldest first. The service bounds this history; a
+    /// presenter may render it but must not treat it as a durable transcript.
+    #[serde(default)]
+    pub messages: Vec<RoomMessage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,6 +373,7 @@ struct RoomState {
     space: String,
     revision: u64,
     members: BTreeMap<String, Member>,
+    messages: Vec<RoomMessage>,
 }
 
 /// Ephemeral rooms. A room disappears when its last member leaves.
@@ -426,6 +467,7 @@ impl Rooms {
                     space: space.clone(),
                     revision: 0,
                     members: BTreeMap::new(),
+                    messages: Vec::new(),
                 });
             room.members.insert(id.to_owned(), member.clone());
             room.revision += 1;
@@ -489,6 +531,49 @@ impl Rooms {
         }))
     }
 
+    /// Publish one room message. The sender must be in the room; the service
+    /// owns the message id, sender identity, timestamp and revision. The
+    /// message is kept in bounded room history for late joiners and returned
+    /// so the plugin can broadcast it to every current member.
+    pub fn say(&mut self, from: &str, text: &str, now: u64) -> Result<RoomMessage, RoomError> {
+        let text = text.trim();
+        if text.is_empty() || text.len() > MAX_MESSAGE || text.chars().any(char::is_control) {
+            return Err(RoomError::invalid(format!(
+                "message must be 1-{MAX_MESSAGE} printable bytes"
+            )));
+        }
+        let room_id = self
+            .room_of(from)
+            .map(str::to_owned)
+            .ok_or_else(|| RoomError::new(ErrorCode::NotJoined, "join a room first"))?;
+        let room = self
+            .rooms
+            .get_mut(&room_id)
+            .ok_or_else(|| RoomError::new(ErrorCode::NotJoined, "room disappeared"))?;
+        let display_name = room
+            .members
+            .get(from)
+            .ok_or_else(|| RoomError::new(ErrorCode::NotJoined, "member disappeared"))?
+            .display_name
+            .clone();
+        room.revision += 1;
+        let message = RoomMessage {
+            id: format!("say-{room_id}-{}", room.revision),
+            revision: room.revision,
+            room: room_id,
+            from: from.to_owned(),
+            display_name,
+            text: text.to_owned(),
+            sent_at_ms: now,
+        };
+        room.messages.push(message.clone());
+        let excess = room.messages.len().saturating_sub(MAX_HISTORY);
+        if excess > 0 {
+            room.messages.drain(..excess);
+        }
+        Ok(message)
+    }
+
     /// Deliver one addressed turn to an agent in the caller's room. Only the
     /// target receives it; this is not a room broadcast and it is not a
     /// transcript.
@@ -500,7 +585,9 @@ impl Rooms {
             .ok_or_else(|| RoomError::new(ErrorCode::NotJoined, "join a room first"))?;
         let text = address.text.trim();
         if text.is_empty() || text.len() > MAX_ADDRESS || text.chars().any(char::is_control) {
-            return Err(RoomError::invalid("address text must be 1-1000 printable bytes"));
+            return Err(RoomError::invalid(
+                "address text must be 1-1000 printable bytes",
+            ));
         }
         let room = self
             .rooms
@@ -534,6 +621,7 @@ impl Rooms {
             me,
             members: room.members.values().cloned().collect(),
             buses: self.buses(room),
+            messages: room.messages.clone(),
         })
     }
 
@@ -792,6 +880,41 @@ mod tests {
             .unwrap();
         assert!(same.is_none());
         assert_eq!(rooms.welcome("avery").unwrap().revision, 2);
+    }
+
+    #[test]
+    fn say_is_room_scoped_and_keeps_bounded_history() {
+        let mut rooms = rooms();
+        rooms
+            .join("avery", join("studio", "Avery"), Role::Owner, 10)
+            .unwrap();
+        rooms
+            .join("james", join("studio", "James"), Role::Member, 11)
+            .unwrap();
+
+        let message = rooms.say("james", "  hello room  ", 12).unwrap();
+        assert_eq!(message.room, "studio");
+        assert_eq!(message.from, "james");
+        assert_eq!(message.display_name, "James");
+        assert_eq!(message.text, "hello room");
+        assert_eq!(message.id, "say-studio-3");
+        let welcome = rooms.welcome("avery").unwrap();
+        assert_eq!(welcome.revision, 3);
+        assert_eq!(welcome.messages, vec![message]);
+
+        assert!(rooms.say("avery", "", 13).is_err());
+        assert!(rooms.say("avery", "line\nbreak", 13).is_err());
+        assert!(
+            rooms
+                .say("avery", &"x".repeat(MAX_MESSAGE + 1), 13)
+                .is_err()
+        );
+        assert_eq!(rooms.welcome("avery").unwrap().revision, 3);
+        assert_eq!(rooms.welcome("avery").unwrap().messages.len(), 1);
+        assert_eq!(
+            rooms.say("nobody", "hello", 13).unwrap_err().code,
+            ErrorCode::NotJoined
+        );
     }
 
     #[test]

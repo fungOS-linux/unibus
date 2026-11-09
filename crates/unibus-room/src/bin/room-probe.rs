@@ -24,7 +24,8 @@ use unibus::{
 };
 use unibus_room::{
     BusClass, CAP_MEMBER, ERROR_KIND, JOIN_KIND, Join, LEAVE_KIND, LIST_KIND, LIST_REPLY_KIND,
-    ListReply, MEMBER_KIND, MemberChange, MemberEvent, Presence, Presenter, WELCOME_KIND, Welcome,
+    ListReply, MEMBER_KIND, MESSAGE_KIND, MemberChange, MemberEvent, Presence, Presenter,
+    RoomMessage, WELCOME_KIND, Welcome,
 };
 
 struct Args {
@@ -67,6 +68,10 @@ fn main() -> Result<()> {
                 MEMBER_KIND => {
                     let event: MemberEvent = decode(&envelope)?;
                     print_event(&event);
+                }
+                MESSAGE_KIND => {
+                    let message: RoomMessage = decode(&envelope)?;
+                    println!("message {}: {}", message.display_name, message.text);
                 }
                 LIST_REPLY_KIND => {
                     let reply: ListReply = decode(&envelope)?;

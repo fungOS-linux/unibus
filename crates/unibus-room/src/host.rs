@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::{
     Bus, BusClass, ListReply, Member, MemberChange, MemberEvent, Mic, Presence, Presenter, Role,
-    RoomSummary, Welcome,
+    RoomMessage, RoomSummary, Welcome,
 };
 
 #[derive(Debug, Default)]
@@ -42,10 +42,41 @@ impl Projection {
         self.error = error;
     }
 
-    /// Add one transcript-only message. The room transcript is opt-in and lives
-    /// outside the room service; the projection only carries what the current
-    /// room may render.
+    /// Add one locally-authored transcript message. The room transcript is
+    /// opt-in and lives outside the room service; the projection only carries
+    /// what the current room may render.
     pub fn add_message(&mut self, room: &str, from: &str, text: &str, mine: bool, id: &str) {
+        self.push_message(id, room, from, text, mine);
+    }
+
+    /// Apply one service-authored room message. The service already stamped
+    /// the sender, room and id; the presenter only decides whether it is mine.
+    pub fn apply_message(&mut self, message: RoomMessage) {
+        self.revision = self.revision.max(message.revision);
+        let Some(welcome) = &self.welcome else {
+            return;
+        };
+        if welcome.room != message.room {
+            return;
+        }
+        let mine = message.from == welcome.me.id;
+        self.push_message(
+            &message.id,
+            &message.room,
+            &message.display_name,
+            &message.text,
+            mine,
+        );
+    }
+
+    fn push_message(&mut self, id: &str, room: &str, from: &str, text: &str, mine: bool) {
+        if self
+            .messages
+            .iter()
+            .any(|message| message.get("id").and_then(Value::as_str) == Some(id))
+        {
+            return;
+        }
         self.messages.push(json!({
             "id": id,
             "room": room,
@@ -62,6 +93,21 @@ impl Projection {
     pub fn apply_welcome(&mut self, mut welcome: Welcome) {
         self.revision = self.revision.max(welcome.revision);
         refresh_bus_publishers(&mut welcome);
+        if self.welcome.as_ref().map(|current| current.room.as_str()) != Some(welcome.room.as_str())
+        {
+            self.messages.clear();
+        }
+        let self_id = welcome.me.id.clone();
+        let history = welcome.messages.clone();
+        for message in history {
+            self.push_message(
+                &message.id,
+                &message.room,
+                &message.display_name,
+                &message.text,
+                message.from == self_id,
+            );
+        }
         if let Some(room) = self.rooms.iter_mut().find(|room| room.room == welcome.room) {
             room.members = welcome.members.len() as u32;
             room.revision = welcome.revision;
@@ -107,6 +153,7 @@ impl Projection {
         if let Some(welcome) = self.welcome.take() {
             self.revision = self.revision.max(welcome.revision);
         }
+        self.messages.clear();
     }
 
     pub fn apply_member(&mut self, event: MemberEvent) {
@@ -375,6 +422,7 @@ mod tests {
                     lossless: true,
                 },
             ],
+            messages: Vec::new(),
         }
     }
 
@@ -438,6 +486,40 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["text"], "hello");
         assert_eq!(messages[0]["mine"], true);
+    }
+
+    #[test]
+    fn federated_messages_seed_from_welcome_and_dedupe() {
+        let mut projection = Projection::default();
+        let mut welcome = welcome();
+        welcome.messages = vec![RoomMessage {
+            id: "say-listening-room-7".into(),
+            revision: 7,
+            room: "listening-room".into(),
+            from: "avery".into(),
+            display_name: "Avery".into(),
+            text: "hello".into(),
+            sent_at_ms: 1,
+        }];
+        projection.apply_welcome(welcome);
+        let live = RoomMessage {
+            id: "say-listening-room-8".into(),
+            revision: 8,
+            room: "listening-room".into(),
+            from: "jarvis".into(),
+            display_name: "JARVIS".into(),
+            text: "ready".into(),
+            sent_at_ms: 2,
+        };
+        projection.apply_message(live.clone());
+        projection.apply_message(live);
+        let snapshot = projection.snapshot("FPL Rooms", "Avery", true, json!({"state":"idle"}));
+        let messages = snapshot["room"]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["from"], "Avery");
+        assert_eq!(messages[0]["mine"], true);
+        assert_eq!(messages[1]["from"], "JARVIS");
+        assert_eq!(messages[1]["mine"], false);
     }
 
     #[test]

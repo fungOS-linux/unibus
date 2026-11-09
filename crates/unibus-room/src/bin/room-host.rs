@@ -24,8 +24,8 @@ use unibus::{
 };
 use unibus_room::{
     ADDRESS_KIND, Address, BusClass, ERROR_KIND, JOIN_KIND, Join, LEAVE_KIND, LIST_KIND,
-    LIST_REPLY_KIND, MEMBER_KIND, MemberEvent, Mic, Presence, Presenter, SELF_KIND, SelfState,
-    WELCOME_KIND, Welcome, host::Projection,
+    LIST_REPLY_KIND, MEMBER_KIND, MESSAGE_KIND, MemberEvent, Mic, Presence, Presenter, SELF_KIND,
+    SelfState, WELCOME_KIND, Welcome, host::Projection,
 };
 
 const STREAM_SCHEMA_VERSION: u32 = 1;
@@ -98,6 +98,10 @@ fn main() -> Result<()> {
                 MEMBER_KIND => {
                     let event: MemberEvent = decode(&envelope)?;
                     projection.apply_member(event);
+                    dirty = true;
+                }
+                MESSAGE_KIND => {
+                    projection.apply_message(decode(&envelope)?);
                     dirty = true;
                 }
                 LIST_REPLY_KIND => {

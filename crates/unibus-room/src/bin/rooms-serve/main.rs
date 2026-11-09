@@ -31,8 +31,8 @@ use unibus::{
 };
 use unibus_room::{
     ADDRESS_KIND, Address, BusClass, ERROR_KIND, JOIN_KIND, Join, LEAVE_KIND, LIST_KIND,
-    LIST_REPLY_KIND, MEMBER_KIND, Mic, Presence, Presenter, SELF_KIND, SelfState, WELCOME_KIND,
-    Welcome, host::Projection,
+    LIST_REPLY_KIND, MEMBER_KIND, MESSAGE_KIND, Mic, Presence, Presenter, SAY_KIND, SELF_KIND,
+    SelfState, WELCOME_KIND, Welcome, host::Projection,
 };
 
 const DEFAULT_BIND: &str = "127.0.0.1:8793";
@@ -150,6 +150,10 @@ fn run() -> Result<()> {
                     projection.apply_member(decode(&envelope)?);
                     dirty = true;
                 }
+                MESSAGE_KIND => {
+                    projection.apply_message(decode(&envelope)?);
+                    dirty = true;
+                }
                 LIST_REPLY_KIND => {
                     projection.apply_list(decode(&envelope)?);
                     dirty = true;
@@ -260,22 +264,15 @@ fn apply_action(
     selection: &mut Selection,
 ) -> Result<()> {
     let message = message.map(str::trim).filter(|text| !text.is_empty());
-    if id == "send-message" {
-        if let (Some(text), Some(welcome)) = (message, projection.welcome()) {
-            let room = welcome.room.clone();
-            let speaker_id = welcome.me.id.clone();
-            let speaker_name = welcome.me.display_name.clone();
-            let segment_id = format!("{speaker_id}-{}", now_ms());
-            projection.add_message(&room, &speaker_name, text, true, &segment_id);
-        } else if message.is_none() {
+    if id == "send-message" || id == "message-room" {
+        let Some(text) = message else {
             projection.set_error(Some("a room message cannot be empty".into()));
-        }
-        return Ok(());
-    }
-    if id == "message-room" {
-        projection.set_error(Some(
-            "message input is available in rooms.myc; this presenter has no text field yet".into(),
-        ));
+            return Ok(());
+        };
+        // The room service stamps the sender and broadcasts the event back to
+        // every member, including this presenter. The local projection learns
+        // about the message from room.message.v1, not from this request.
+        send(client, SAY_KIND, json!({ "text": text }))?;
         return Ok(());
     }
     // Call controls are handled by the page before they reach this endpoint:

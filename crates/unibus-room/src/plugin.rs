@@ -15,9 +15,9 @@ use unibus::{Envelope, Message};
 use unibus_router::plugin::{HubHandle, HubPlugin};
 
 use crate::{
-    ADDRESSED_KIND, ADDRESS_KIND, Address, CAP_MEMBER, ERROR_KIND, ErrorCode, JOIN_KIND, Join,
-    LEAVE_KIND, LIST_KIND, LIST_REPLY_KIND, MEMBER_KIND, MemberEvent, RoomConfig, RoomError, Rooms,
-    SELF_KIND, SelfState, WELCOME_KIND, role_for,
+    ADDRESS_KIND, ADDRESSED_KIND, Address, CAP_MEMBER, ERROR_KIND, ErrorCode, JOIN_KIND, Join,
+    LEAVE_KIND, LIST_KIND, LIST_REPLY_KIND, MEMBER_KIND, MESSAGE_KIND, MemberEvent, RoomConfig,
+    RoomError, RoomMessage, Rooms, SAY_KIND, SELF_KIND, Say, SelfState, WELCOME_KIND, role_for,
 };
 
 pub const SERVICE_ID: &str = "unibus-room";
@@ -62,6 +62,15 @@ impl RoomPlugin {
             if member != exclude {
                 let _ = self.send(hub, &member, MEMBER_KIND, body.clone());
             }
+        }
+    }
+
+    fn broadcast_message(&self, hub: &HubHandle, rooms: &Rooms, message: &RoomMessage) {
+        let Ok(body) = serde_json::to_value(message) else {
+            return;
+        };
+        for member in rooms.members(&message.room) {
+            let _ = self.send(hub, &member, MESSAGE_KIND, body.clone());
         }
     }
 }
@@ -154,10 +163,23 @@ impl HubPlugin for RoomPlugin {
                 match rooms.address(source, address) {
                     Ok(addressed) => {
                         let destination = addressed.target.clone();
-                        let body = serde_json::to_value(&addressed)
-                            .context("serialize addressed turn")?;
+                        let body =
+                            serde_json::to_value(&addressed).context("serialize addressed turn")?;
                         let _ = self.send(hub, &destination, ADDRESSED_KIND, body);
                     }
+                    Err(error) => self.send_error(hub, source, error),
+                }
+            }
+            SAY_KIND => {
+                let say = match parse::<Say>(envelope) {
+                    Ok(say) => say,
+                    Err(error) => {
+                        self.send_error(hub, source, error);
+                        return Ok(true);
+                    }
+                };
+                match rooms.say(source, &say.text, unibus::envelope::now_ms()) {
+                    Ok(message) => self.broadcast_message(hub, &rooms, &message),
                     Err(error) => self.send_error(hub, source, error),
                 }
             }

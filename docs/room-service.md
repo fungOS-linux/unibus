@@ -1,18 +1,18 @@
 # Room service
 
-Status: **control path, addressed turns, direct media proof and browser
-presenter, 2026-11-09.** `crates/unibus-room` implements room membership,
-presence, audio-bus declarations and addressed agent turns as a hub plugin,
-plus a two-machine probe, a Canvas host, a headless agent and `rooms-serve`.
-The browser presenter carries WebRTC audio between tabs; the room service still
-carries no media bytes. Screen share, full-room transcription and the Holodeck
-adapter are not part of this cut.
+Status: **control path, room text, addressed turns, direct media proof and
+browser presenter, 2026-11-09.** `crates/unibus-room` implements room
+membership, presence, audio-bus declarations, ephemeral room text and addressed
+agent turns as a hub plugin, plus a two-machine probe, a Canvas host, a
+headless agent and `rooms-serve`. The browser presenter carries WebRTC audio
+between tabs; the room service still carries no media bytes. Screen share,
+full-room transcription and the Holodeck adapter are not part of this cut.
 
 A room is one shared space with two presenters: the flat Canvas view and
-Holodeck. Membership, the `space` id, presence and the audio buses are shared;
-the presenter is a per-member field. The room is hosted by a member's node: the
-binary below is simply a Unibus hub with the room plugin installed, so there is
-no central room registry.
+Holodeck. Membership, the `space` id, presence, room text and the audio buses
+are shared; the presenter is a per-member field. The room is hosted by a
+member's node: the binary below is simply a Unibus hub with the room plugin
+installed, so there is no central room registry.
 
 ## Contract
 
@@ -24,11 +24,13 @@ body field.
 | Kind | Direction | Body |
 |---|---|---|
 | `room.join.v1` | client → service | `{room, space?, display_name, presenter?, presence?, audio?}` |
+| `room.say.v1` | client → service | `{text}`; sender is the authenticated producer |
 | `room.address.v1` | client → service | `{target, text}`; target must be an agent in the same room |
 | `room.leave.v1` | client → service | `{}` |
 | `room.self.v1` | client → service | `{presence, mic, speaking, presenter?}` |
 | `room.list.v1` | client → service | `{}` |
-| `room.welcome.v1` | service → joining client | `{revision, room, space, self, members[], buses[]}` |
+| `room.welcome.v1` | service → joining client | `{revision, room, space, self, members[], buses[], messages[]}` |
+| `room.message.v1` | service → every room member | `{id, revision, room, from, display_name, text, sent_at_ms}` |
 | `room.addressed.v1` | service → target agent | `{revision, room, target, from, text, turn_id}`; never broadcast |
 | `room.member.v1` | service → room members | `{revision, room, change: joined/left/updated, member}` |
 | `room.list.reply.v1` | service → requester | `{rooms[]}` |
@@ -47,6 +49,15 @@ domain outcome. Read both.
 target are in the same room and that the target has the agent role. The target
 receives one `room.addressed.v1`; other members receive nothing. This is the
 agent's addressed-turn trigger, not a transcript and not a media path.
+
+`room.say.v1` is room text, not media. The service stamps the sender from the
+authenticated producer id, rejects empty/control-character text and messages
+over 2000 bytes, and broadcasts one `room.message.v1` to every current member,
+including the sender. The service keeps the last 200 messages per room and
+includes that history in `room.welcome.v1`, so a presenter that joins late can
+render recent text without a separate history request. This history is
+ephemeral and disappears with the room; durable text belongs on the
+records/conversation path.
 
 ## Roles and identity
 
@@ -79,7 +90,7 @@ trusted-LAN example with two members:
       "token_file": "tokens/avery.token",
       "zones": ["default"],
       "capabilities": ["room.member", "room.owner"],
-      "publishes": ["room.join.v1", "room.leave.v1", "room.self.v1", "room.list.v1"],
+      "publishes": ["room.join.v1", "room.say.v1", "room.address.v1", "room.leave.v1", "room.self.v1", "room.list.v1"],
       "publish_zones": ["default"]
     },
     {
@@ -87,7 +98,7 @@ trusted-LAN example with two members:
       "token_file": "tokens/james.token",
       "zones": ["default"],
       "capabilities": ["room.member"],
-      "publishes": ["room.join.v1", "room.leave.v1", "room.self.v1", "room.list.v1"],
+      "publishes": ["room.join.v1", "room.say.v1", "room.address.v1", "room.leave.v1", "room.self.v1", "room.list.v1"],
       "publish_zones": ["default"]
     }
   ]
@@ -128,8 +139,9 @@ cargo run -p unibus-room --bin room-probe -- avery.json studio --name Avery
 cargo run -p unibus-room --bin room-probe -- james.json studio --name James --presenter holodeck
 ```
 
-`room-probe` prints the welcome, every member event, and `--list` prints the
-room directory. It leaves the room on exit or after `--seconds` (default 30).
+`room-probe` prints the welcome, every member event, every room message, and
+`--list` prints the room directory. It leaves the room on exit or after
+`--seconds` (default 30).
 The `unibus-room` package's integration test performs the same flow over a real
 loopback hub.
 
@@ -154,6 +166,8 @@ to `RoomPlugin::with_config`.
 ## Limits and lifecycle
 
 - 64 rooms, 32 members per room, 4 buses; buffer targets 10–2000 ms.
+- Room text is 1–2000 printable bytes per message. Each room keeps the last 200
+  messages for late joiners, inside the room service's ephemeral state.
 - One room per member. Joining another room leaves the first and emits a `left`
 event to that room; rejoining the same room is idempotent and does not bump the
 revision.
@@ -167,8 +181,9 @@ revision.
 
 - Media: audio bus bytes stay on isochrone/WebRTC adapters; this service carries
   membership and bus state only.
-- Signaling, screen share, bus mutation by clients, text bodies (use
-  `fungos.conversation` records), persistence and migration when a host leaves.
+- Signaling, screen share, bus mutation by clients, durable text/records,
+  persistence and migration when a host leaves. Room chat is ephemeral and
+  bounded; `fungos.conversation` records are still the durable path.
 - Durable room transcripts or recording. `room.address.v1` delivers an
   addressed turn; it does not create a transcript.
 - A separate high-rate speaking kind; `room.self.v1` carries `speaking` today.
@@ -225,11 +240,11 @@ The page is audio-only today (`video: false`). A camera or screen track can be
 added to the same peer connection later; adding video does not need a room
 service change, but group video will need an SFU rather than a mesh.
 
-The composer writes messages into this presenter's room timeline. That timeline
-is host-local: every browser viewing this `rooms-serve` sees it, but another
-room member's server does not. Room-wide text still belongs on the
-records/conversation path, not in `unibus-room`. `Ask JARVIS` sends the typed
-text as the addressed turn.
+The composer publishes `room.say.v1` through the room service, so a message is
+broadcast to every member of the room as `room.message.v1`, not just to the
+browser tabs served by this process. The service's bounded history is seeded
+into the page on join; messages remain ephemeral. `Ask JARVIS` sends the typed
+text as the addressed turn instead.
 
 ## Direct Opus proof
 

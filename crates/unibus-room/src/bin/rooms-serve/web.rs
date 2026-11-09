@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use unibus_room::MAX_MESSAGE;
 
 use crate::Command;
 
@@ -322,10 +323,7 @@ fn handle(
                 return respond(&mut stream, 400, "text/plain", "action id too long", &[]);
             }
             let text = body["text"].as_str().map(str::to_owned);
-            if text
-                .as_ref()
-                .is_some_and(|text| text.chars().count() > 4096)
-            {
+            if text.as_ref().is_some_and(|text| text.len() > MAX_MESSAGE) {
                 return respond(&mut stream, 400, "text/plain", "message too long", &[]);
             }
             let _ = commands.send(Command::Action { id, text });
