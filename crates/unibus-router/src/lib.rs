@@ -15,6 +15,7 @@ mod outbound;
 pub mod plugin;
 pub mod quic;
 pub mod registry;
+pub mod retention;
 pub mod stream_router;
 #[cfg(feature = "viewer")]
 pub mod viewer;
