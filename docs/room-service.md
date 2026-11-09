@@ -1,9 +1,12 @@
 # Room service
 
-Status: **first pass, 2026-11-09.** `crates/unibus-room` implements room
-membership, presence and audio-bus declarations as a hub plugin, plus a
-two-machine probe. Media transport (isochrone/WebRTC), screen share and the
-Holodeck adapter are not part of this cut.
+Status: **control path, addressed turns, direct media proof and browser
+presenter, 2026-11-09.** `crates/unibus-room` implements room membership,
+presence, audio-bus declarations and addressed agent turns as a hub plugin,
+plus a two-machine probe, a Canvas host, a headless agent and `rooms-serve`.
+The browser presenter carries WebRTC audio between tabs; the room service still
+carries no media bytes. Screen share, full-room transcription and the Holodeck
+adapter are not part of this cut.
 
 A room is one shared space with two presenters: the flat Canvas view and
 Holodeck. Membership, the `space` id, presence and the audio buses are shared;
@@ -21,10 +24,12 @@ body field.
 | Kind | Direction | Body |
 |---|---|---|
 | `room.join.v1` | client → service | `{room, space?, display_name, presenter?, presence?, audio?}` |
+| `room.address.v1` | client → service | `{target, text}`; target must be an agent in the same room |
 | `room.leave.v1` | client → service | `{}` |
 | `room.self.v1` | client → service | `{presence, mic, speaking, presenter?}` |
 | `room.list.v1` | client → service | `{}` |
 | `room.welcome.v1` | service → joining client | `{revision, room, space, self, members[], buses[]}` |
+| `room.addressed.v1` | service → target agent | `{revision, room, target, from, text, turn_id}`; never broadcast |
 | `room.member.v1` | service → room members | `{revision, room, change: joined/left/updated, member}` |
 | `room.list.reply.v1` | service → requester | `{rooms[]}` |
 | `room.error.v1` | service → requester | `{code, message}` |
@@ -38,6 +43,11 @@ Every room command also receives the hub's ordinary `unibus.reply` ack. The ack
 means the hub accepted and queued the publication; the `room.*` event is the
 domain outcome. Read both.
 
+`room.address.v1` is text, not audio. The service checks that the sender and the
+target are in the same room and that the target has the agent role. The target
+receives one `room.addressed.v1`; other members receive nothing. This is the
+agent's addressed-turn trigger, not a transcript and not a media path.
+
 ## Roles and identity
 
 Roles come from the node grant, not from the client body:
@@ -46,7 +56,7 @@ Roles come from the node grant, not from the client body:
 |---|---|
 | `room.member` | required to join and receive events |
 | `room.owner` | `owner` |
-| `room.agent` | `agent` |
+| `room.agent` | `agent`; required for `room.addressed.v1` delivery |
 | neither | `member` |
 
 A room that has no explicit owner is still created by the first joiner; the
@@ -157,8 +167,83 @@ revision.
 
 - Media: audio bus bytes stay on isochrone/WebRTC adapters; this service carries
   membership and bus state only.
-- Signaling, screen share, `room.addressed.v1`, bus mutation by clients, text
-  bodies (use `fungos.conversation` records), persistence and migration when a
-  host leaves.
+- Signaling, screen share, bus mutation by clients, text bodies (use
+  `fungos.conversation` records), persistence and migration when a host leaves.
+- Durable room transcripts or recording. `room.address.v1` delivers an
+  addressed turn; it does not create a transcript.
 - A separate high-rate speaking kind; `room.self.v1` carries `speaking` today.
 - Holodeck room adapter: Holodeck still uses its ENet room server.
+
+## Reference host and agent
+
+`room-host` is the Canvas-side reference host. It joins the service, publishes
+the Rooms module snapshot over `canvas.widget.snapshot.v1` on `soil/rooms`, and
+reads local actions from the retained scene. The room service does not know
+Canvas exists.
+
+`room-agent` is a headless participant. A client config needs both
+`room.member` and `room.agent`; the node grant must allow the join/leave/self
+kinds and `room.address.v1` for the human sender. The agent waits for
+`room.addressed.v1`, reports `speaking` and tracks `mic=on` while its TTS child
+is publishing through `room.self.v1`, and starts one TTS child per addressed
+turn. A newer turn cancels the previous child, so the newest answer wins. TTS
+is sent directly as Opus on the speech path; it is never published on the
+program bus.
+
+```sh
+room-host CLIENT.json --room studio --name Avery --agent jarvis \
+  --address-text 'JARVIS, report the room status.'
+room-agent JARVIS.json --room studio --name JARVIS \
+  --peer 127.0.0.1:48000 --bind 127.0.0.1:48010 \
+  --tts-bin soil-opus-call
+```
+
+## Browser presenter
+
+`rooms-serve` is the web presenter for the same Rooms view. It joins one room
+with the identity in its Unibus client config, renders the Spore's Lua view to
+the browser scene, and serves the page at `rooms.myc` through the Mycelium
+gateway.
+
+The page owns the browser microphone and one `RTCPeerConnection` per tab. The
+server relays only SDP offers/answers and ICE candidates over loopback HTTP; no
+media packet enters the room service or the gateway. Each tab has its own call
+session and call panel, so one tab muting does not change another tab's state.
+Because Unibus identity comes from the producer id, one `rooms-serve` process
+is one room member even when two tabs are in the audio mesh. A second person
+runs a second server with a second client identity. `room-agent` does not yet
+join the browser mesh.
+
+```sh
+rooms-serve --config james.json --room studio --name James \
+  --spore-root ../spores/spores/rooms \
+  --ui ../spores/sdk/ui/ui.lua \
+  --bind 127.0.0.1:8793
+```
+
+The page is audio-only today (`video: false`). A camera or screen track can be
+added to the same peer connection later; adding video does not need a room
+service change, but group video will need an SFU rather than a mesh.
+
+The composer writes messages into this presenter's room timeline. That timeline
+is host-local: every browser viewing this `rooms-serve` sees it, but another
+room member's server does not. Room-wide text still belongs on the
+records/conversation path, not in `unibus-room`. `Ask JARVIS` sends the typed
+text as the addressed turn.
+
+## Direct Opus proof
+
+`soil-opus-call` in the Soil repository is the media proof for this cut. It
+sends one Opus/RTP stream each way over direct UDP at 48 kHz mono, 20 ms frames,
+with no SFU or relay. Use ports two apart because ffmpeg allocates RTCP on the
+next port.
+
+## Transcript-only mode
+
+The first transcript mode records the **text** of an addressed turn, not audio,
+into a host-local JSONL file (`room-host --transcript PATH` or
+`rooms-serve --transcript PATH`). It is opt-in and
+lives outside the room service. Full-room transcription must subscribe to each
+participant's audio track separately and publish through a separate
+transcription/records path; it must never record a mixed bus merely to obtain
+text.

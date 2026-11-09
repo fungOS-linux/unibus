@@ -14,9 +14,9 @@ use unibus::{
     client::{Client, ClientConfig},
 };
 use unibus_room::{
-    BusClass, ERROR_KIND, JOIN_KIND, Join, LEAVE_KIND, LIST_KIND, LIST_REPLY_KIND, ListReply,
-    MEMBER_KIND, MemberChange, MemberEvent, Presence, Presenter, Role, SELF_KIND, WELCOME_KIND,
-    Welcome, plugin::RoomPlugin,
+    ADDRESSED_KIND, ADDRESS_KIND, Addressed, BusClass, ERROR_KIND, JOIN_KIND, Join,
+    LEAVE_KIND, LIST_KIND, LIST_REPLY_KIND, ListReply, MEMBER_KIND, MemberChange, MemberEvent,
+    Presence, Presenter, Role, SELF_KIND, WELCOME_KIND, Welcome, plugin::RoomPlugin,
 };
 use unibus_router::{Hub, config::HubConfig};
 
@@ -35,9 +35,10 @@ fn start() -> TestHub {
         "installation_id": "home",
         "listen": "127.0.0.1:0",
         "nodes": [
-            {"producer_id":"avery","token_file":"token","zones":["default"],"capabilities":["room.member","room.owner"],"publishes":["room.join.v1","room.leave.v1","room.self.v1","room.list.v1"],"publish_zones":["default"]},
-            {"producer_id":"james","token_file":"token","zones":["default"],"capabilities":["room.member"],"publishes":["room.join.v1","room.leave.v1","room.self.v1","room.list.v1"],"publish_zones":["default"]},
-            {"producer_id":"intruder","token_file":"token","zones":["default"],"capabilities":["room.observer"],"publishes":["room.join.v1"],"publish_zones":["default"]}
+            {"producer_id":"avery","token_file":"token","zones":["default"],"capabilities":["room.member","room.owner"],"publishes":["room.join.v1","room.address.v1","room.leave.v1","room.self.v1","room.list.v1"],"publish_zones":["default"]},
+            {"producer_id":"james","token_file":"token","zones":["default"],"capabilities":["room.member"],"publishes":["room.join.v1","room.address.v1","room.leave.v1","room.self.v1","room.list.v1"],"publish_zones":["default"]},
+            {"producer_id":"intruder","token_file":"token","zones":["default"],"capabilities":["room.observer"],"publishes":["room.join.v1"],"publish_zones":["default"]},
+            {"producer_id":"jarvis","token_file":"token","zones":["default"],"capabilities":["room.member","room.agent"],"publishes":["room.join.v1","room.leave.v1","room.self.v1"],"publish_zones":["default"]}
         ]
     }"#;
     std::fs::write(dir.path().join("hub.json"), config_json).unwrap();
@@ -215,4 +216,46 @@ fn joining_another_room_moves_the_member() {
     let left: MemberEvent = decode(&recv_kind(&avery, MEMBER_KIND));
     assert_eq!(left.change, MemberChange::Left);
     assert_eq!(left.room, "studio");
+}
+
+#[test]
+fn addressed_turns_go_only_to_the_target_agent() {
+    let hub = start();
+    let avery = client(&hub, "avery", &["room.member"]);
+    let jarvis = client(&hub, "jarvis", &["room.member", "room.agent"]);
+
+    send(
+        &avery,
+        JOIN_KIND,
+        join("studio", "Avery", Presenter::Canvas, BusClass::Speech),
+    );
+    let avery_welcome: Welcome = decode(&recv_kind(&avery, WELCOME_KIND));
+    assert_eq!(avery_welcome.me.role, Role::Owner);
+    send(
+        &jarvis,
+        JOIN_KIND,
+        join("studio", "JARVIS", Presenter::Canvas, BusClass::Speech),
+    );
+    let jarvis_welcome: Welcome = decode(&recv_kind(&jarvis, WELCOME_KIND));
+    assert_eq!(jarvis_welcome.me.role, Role::Agent);
+
+    send(
+        &avery,
+        ADDRESS_KIND,
+        json!({"target":"jarvis","text":"Report the room status."}),
+    );
+    let addressed: Addressed = decode(&recv_kind(&jarvis, ADDRESSED_KIND));
+    assert_eq!(addressed.room, "studio");
+    assert_eq!(addressed.target, "jarvis");
+    assert_eq!(addressed.from, "avery");
+    assert_eq!(addressed.text, "Report the room status.");
+    assert!(addressed.turn_id > 0);
+
+    send(
+        &avery,
+        ADDRESS_KIND,
+        json!({"target":"avery","text":"This is not an agent."}),
+    );
+    let error: serde_json::Value = decode(&recv_kind(&avery, ERROR_KIND));
+    assert_eq!(error["code"], "invalid");
 }

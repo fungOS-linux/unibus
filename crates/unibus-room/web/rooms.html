@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Rooms</title>
+<style>
+  html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#191919;color:#e9e9e7;
+    font:13px ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif}
+  canvas{display:block;width:100%;height:100%}
+  #status{position:fixed;right:14px;bottom:10px;color:#6a6a6a;font-size:11px;
+    pointer-events:none;z-index:1;background:rgba(25,25,25,.72);padding:2px 6px;border-radius:4px}
+  /* The view draws the field surface and prompt; this input is the caret and
+     the keys. Its opaque background covers the prompt as soon as it has text. */
+  #composer{position:fixed;display:none;box-sizing:border-box;appearance:none;
+    -webkit-appearance:none;border:1px solid #303746;box-shadow:none;outline:0;
+    background:#0d0f14;color:#e9e9e7;border-radius:6px;z-index:3;
+    font:15px ui-sans-serif,-apple-system,Helvetica,Arial,sans-serif;padding:0 10px}
+  #composer:focus{border-color:#4c5a70}
+  #composer::placeholder{color:#6a7486}
+  audio{display:none}
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<input id="composer" autocomplete="off" autocapitalize="off" spellcheck="false"
+  placeholder="Message the room">
+<div id="status">loading</div>
+<div id="audio"></div>
+<script>
+// Rooms is a presenter over the same Lua view Canvas draws. The page owns the
+// pixels and the browser media APIs; the host owns membership, the snapshot and
+// the control actions. The scene document is rendered from ui/rooms.lua by the
+// Rust host, never reimplemented in JavaScript.
+const canvas = document.getElementById('scene');
+const ctx = canvas.getContext('2d');
+const frame = document.createElement('canvas');
+const paint = frame.getContext('2d');
+const status = document.getElementById('status');
+const audioRoot = document.getElementById('audio');
+const composer = document.getElementById('composer');
+
+let dpr = 1, size = {w: 0, h: 0};
+let current = null, lastBody = null, tag = null, inFlight = false;
+let hover = '';
+let queued = false, timer = 0;
+
+const SESSION = (() => {
+  try {
+    const saved = sessionStorage.getItem('rooms-session');
+    if (saved) return saved;
+    const id = crypto.randomUUID();
+    sessionStorage.setItem('rooms-session', id);
+    return id;
+  } catch (_) { return 'peer-' + Math.random().toString(36).slice(2); }
+})();
+const NAME = localStorage.getItem('rooms-name') || 'Guest';
+
+const INKS = {
+  background: '#0d0f14', surface: '#1e2430', text: '#e6ebf5', muted: '#8b96ab',
+  primary: '#f2f5fb', success: '#a6da95', warning: '#eed49f', info: '#7dc4e4',
+  danger: '#ed8796', accent: '#7dc4e4', border: '#8b96ab', divider: '#8b96ab',
+};
+function fillOf(node) {
+  const alpha = node.opacity ?? 1;
+  if (node.rgb) return `rgba(${node.rgb[0]},${node.rgb[1]},${node.rgb[2]},${alpha})`;
+  const hex = INKS[node.ink] || INKS.text;
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+}
+function xOf(u) { return (u + 4) / 8 * size.w; }
+function yOf(u) { return (4 - u) / 8 * size.h; }
+function rectOf(button) {
+  return { x: xOf(button.x), y: yOf(button.y), w: button.width / 8 * size.w,
+    h: button.height / 8 * size.h };
+}
+
+function fit() {
+  const next = { w: innerWidth, h: innerHeight };
+  if (next.w === size.w && next.h === size.h && canvas.width > 0) return false;
+  dpr = window.devicePixelRatio || 1;
+  size = next;
+  canvas.width = Math.floor(size.w * dpr);
+  canvas.height = Math.floor(size.h * dpr);
+  frame.width = canvas.width;
+  frame.height = canvas.height;
+  return true;
+}
+
+function draw(scene) {
+  paint.setTransform(dpr, 0, 0, dpr, 0, 0);
+  paint.clearRect(0, 0, size.w, size.h);
+  const nodes = [...(scene.nodes || [])].sort(
+    (a, b) => ((a.transform?.translation?.[2] ?? 0) - (b.transform?.translation?.[2] ?? 0)));
+  const paintNode = (node) => {
+    const t = node.transform || {};
+    const [x, y] = t.translation || [0, 0, 0];
+    const [sx, sy] = t.scale || [1, 1, 1];
+    paint.fillStyle = fillOf(node);
+    if (node.type === 'rect') {
+      const px = xOf(x), py = yOf(y);
+      const rw = sx / 8 * size.w, rh = sy / 8 * size.h;
+      const radius = Math.min(node.radius || 0, rw / 2, rh / 2);
+      paint.beginPath();
+      if (paint.roundRect) paint.roundRect(px, py, rw, rh, radius);
+      else paint.rect(px, py, rw, rh);
+      paint.fill();
+    } else if (node.type === 'text') {
+      paint.font = `${node.px || 13}px ui-sans-serif, -apple-system, Helvetica, Arial, sans-serif`;
+      paint.textBaseline = 'top';
+      paint.fillText(node.text || '', xOf(x), yOf(y));
+    }
+  };
+
+  // Canvas paints controls itself; this page is the host and must do the same.
+  // Rects first, then host-owned button surfaces, then text, so a pill sits
+  // behind its label without a second copy of the label in JavaScript.
+  for (const node of nodes) if (node.type !== 'text') paintNode(node);
+  for (const button of scene.buttons || []) {
+    // A field already drew its own surface in the scene; the browser input is
+    // its live surface and sits above the canvas.
+    if (button.appearance === 'field' || button.id === 'message-input') continue;
+    const box = rectOf(button);
+    const active = button.id === hover;
+    paint.fillStyle = active ? 'rgba(125,196,228,.16)' : 'rgba(255,255,255,.055)';
+    paint.strokeStyle = active ? 'rgba(125,196,228,.75)' : 'rgba(255,255,255,.10)';
+    paint.lineWidth = 1;
+    paint.beginPath();
+    if (paint.roundRect) paint.roundRect(box.x + .5, box.y + .5, box.w - 1, box.h - 1, 6);
+    else paint.rect(box.x + .5, box.y + .5, box.w - 1, box.h - 1);
+    paint.fill();
+    paint.stroke();
+  }
+  for (const node of nodes) if (node.type === 'text') paintNode(node);
+
+  // One visible frame, drawn from a completed off-screen frame. A half-built
+  // scene never gets a chance to flash between polls.
+  if (hover) {
+    const button = (current?.buttons || []).find((entry) => entry.id === hover);
+    if (button) {
+      const box = rectOf(button);
+      paint.strokeStyle = 'rgba(125,196,228,.85)';
+      paint.lineWidth = 1;
+      paint.beginPath();
+      if (paint.roundRect) paint.roundRect(box.x + .5, box.y + .5, box.w - 1, box.h - 1, 6);
+      else paint.rect(box.x + .5, box.y + .5, box.w - 1, box.h - 1);
+      paint.stroke();
+    }
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(frame, 0, 0);
+  place();
+}
+
+// The field's geometry comes from the scene, so the input never has to repeat
+// the three-column layout. It is hidden in widget and fullscreen views.
+function place() {
+  if (!current) return;
+  const field = (current.buttons || []).find((button) => button.id === 'message-input');
+  if (!field) { composer.style.display = 'none'; return; }
+  const box = rectOf(field);
+  composer.style.display = 'block';
+  composer.style.left = `${box.x + 2}px`;
+  composer.style.top = `${box.y + 2}px`;
+  composer.style.width = `${Math.max(24, box.w - 4)}px`;
+  composer.style.height = `${Math.max(20, box.h - 4)}px`;
+}
+
+function schedule(delay = 80) {
+  clearTimeout(timer);
+  timer = setTimeout(refresh, delay);
+}
+
+async function refresh() {
+  if (inFlight) { queued = true; return; }
+  inFlight = true;
+  fit();
+  try {
+    const params = new URLSearchParams({
+      w: Math.round(size.w), h: Math.round(size.h), session: SESSION,
+    });
+    const headers = tag ? { 'if-none-match': tag } : {};
+    const response = await fetch(`scene.json?${params}`, { cache: 'no-cache', headers });
+    if (response.status === 304) return;
+    if (!response.ok) throw new Error(`scene ${response.status}: ${await response.text()}`);
+    const body = await response.text();
+    tag = response.headers.get('etag') || tag;
+    if (body === lastBody) return;
+    lastBody = body;
+    const scene = JSON.parse(body);
+    if (scene.error) throw new Error(scene.error);
+    current = scene;
+    draw(scene);
+  } catch (error) {
+    status.textContent = String(error.message || error);
+  } finally {
+    inFlight = false;
+    if (queued) { queued = false; schedule(0); }
+  }
+}
+
+function hitAt(x, y) {
+  if (!current) return null;
+  for (let index = current.buttons.length - 1; index >= 0; index -= 1) {
+    const button = current.buttons[index];
+    if (button.enabled === false) continue;
+    const box = rectOf(button);
+    if (x >= box.x && x <= box.x + box.w && y >= box.y && y <= box.y + box.h) return button;
+  }
+  return null;
+}
+
+// ---- browser media -----------------------------------------------------
+// WebRTC is the transport. The room service never sees a media byte: this page
+// captures the mic, sends it over peer connections, and plays what peers send
+// back. Membership and presence still come from unibus-room.
+let callActive = false;
+let callMuted = false;
+let localStream = null;
+let audioCtx = null;
+let analyser = null;
+let meterData = null;
+let meterTimer = null;
+let heartbeatTimer = null;
+let signalTimer = null;
+let lastCallPost = 0;
+const peers = new Map();
+
+async function postJSON(path, body) {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error(`${path} ${response.status}: ${await response.text()}`);
+  return response.headers.get('content-type')?.includes('json') ? response.json() : null;
+}
+
+function postCall(patch) {
+  lastCallPost = Date.now();
+  return postJSON('/api/call', { session: SESSION, ...patch }).catch((error) => {
+    status.textContent = String(error.message || error);
+  });
+}
+
+function peerCount() {
+  let connected = 0;
+  for (const state of peers.values()) {
+    if (state.pc.connectionState === 'connected') connected += 1;
+  }
+  return connected;
+}
+
+async function startCall() {
+  if (callActive) return;
+  callActive = true;
+  callMuted = false;
+  await postCall({ state: 'starting', muted: false, peer_count: 0, mic_rms: 0 });
+  schedule(120);
+  refreshState();
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      video: false,
+    });
+    audioCtx = new AudioContext();
+    const source = audioCtx.createMediaStreamSource(localStream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    meterData = new Float32Array(analyser.fftSize);
+    source.connect(analyser);
+    meterTimer = setInterval(updateMeter, 500);
+    await postCall({
+      state: 'connected', muted: false, route: 'browser-webrtc',
+      format: 'Opus 48 kHz', frame_ms: 20, peer_count: 0, mic_rms: 0,
+    });
+    schedule(120);
+    refreshState();
+    heartbeatTimer = setInterval(heartbeat, 2000);
+    signalTimer = setInterval(pollSignals, 350);
+    await heartbeat();
+  } catch (error) {
+    callActive = false;
+    await postCall({ state: 'failed', error: `Microphone unavailable: ${error.message || error}` });
+  }
+}
+
+async function stopCall(announce = true) {
+  if (!callActive && !localStream) return;
+  callActive = false;
+  clearInterval(meterTimer); clearInterval(heartbeatTimer); clearInterval(signalTimer);
+  meterTimer = heartbeatTimer = signalTimer = null;
+  for (const state of peers.values()) closePeer(state);
+  peers.clear();
+  if (localStream) for (const track of localStream.getTracks()) track.stop();
+  localStream = null;
+  if (audioCtx) await audioCtx.close().catch(() => {});
+  audioCtx = null; analyser = null; meterData = null;
+  if (announce) {
+    await postCall({ state: 'idle', muted: false, peer_count: 0, mic_rms: 0, error: null });
+    schedule(120);
+    refreshState();
+  }
+}
+
+async function setMuted(muted) {
+  callMuted = muted;
+  if (localStream) for (const track of localStream.getAudioTracks()) track.enabled = !muted;
+  await postCall({ state: muted ? 'muted' : 'connected', muted, mic_rms: 0, peer_count: peerCount() });
+  schedule(120);
+  refreshState();
+}
+
+function updateMeter() {
+  if (!analyser || !meterData || !callActive) return;
+  analyser.getFloatTimeDomainData(meterData);
+  let sum = 0;
+  for (const sample of meterData) sum += sample * sample;
+  const rms = Math.sqrt(sum / meterData.length);
+  const now = Date.now();
+  if (now - lastCallPost > 700) postCall({ mic_rms: callMuted ? 0 : rms, peer_count: peerCount() });
+}
+
+function closePeer(state) {
+  try { state.pc.close(); } catch (_) {}
+  if (state.audio) state.audio.remove();
+}
+
+function ensurePeer(id) {
+  let state = peers.get(id);
+  if (state) return state;
+  state = { pc: null, audio: null, pending: [], offered: false };
+  const pc = new RTCPeerConnection({ iceServers: [] });
+  state.pc = pc;
+  if (localStream) for (const track of localStream.getTracks()) pc.addTrack(track, localStream);
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      postJSON('/api/signal', { from: SESSION, to: id, kind: 'ice', data: event.candidate }).catch(() => {});
+    }
+  };
+  pc.ontrack = (event) => {
+    state.audio = state.audio || document.createElement('audio');
+    state.audio.autoplay = true;
+    state.audio.playsInline = true;
+    state.audio.srcObject = event.streams[0];
+    if (!state.audio.isConnected) audioRoot.appendChild(state.audio);
+    state.audio.play().catch(() => {});
+  };
+  pc.onconnectionstatechange = () => {
+    postCall({ peer_count: peerCount() });
+    updateStatus();
+  };
+  peers.set(id, state);
+  return state;
+}
+
+function flushCandidates(state) {
+  for (const candidate of state.pending.splice(0)) {
+    state.pc.addIceCandidate(candidate).catch(() => {});
+  }
+}
+
+async function heartbeat() {
+  if (!callActive) return;
+  try {
+    const reply = await postJSON('/api/peers', {
+      id: SESSION, name: NAME, in_call: true,
+    });
+    const live = new Set();
+    for (const peer of reply.peers || []) {
+      if (peer.id === SESSION || !peer.in_call) continue;
+      live.add(peer.id);
+      if (peers.has(peer.id)) continue;
+      // One deterministic offerer avoids two offers crossing on every pair.
+      if (SESSION < peer.id) offerTo(peer.id);
+    }
+    for (const [id, state] of peers) {
+      if (!live.has(id)) { closePeer(state); peers.delete(id); }
+    }
+  } catch (error) {
+    status.textContent = String(error.message || error);
+  }
+}
+
+async function offerTo(id) {
+  const state = ensurePeer(id);
+  if (state.offered) return;
+  state.offered = true;
+  const offer = await state.pc.createOffer();
+  await state.pc.setLocalDescription(offer);
+  await postJSON('/api/signal', {
+    from: SESSION, to: id, kind: 'offer', data: state.pc.localDescription,
+  });
+}
+
+async function pollSignals() {
+  if (!callActive) return;
+  try {
+    const response = await fetch(`/api/signal?peer=${encodeURIComponent(SESSION)}`);
+    if (!response.ok) return;
+    const messages = await response.json();
+    for (const message of messages.messages || []) await handleSignal(message);
+  } catch (_) {}
+}
+
+async function handleSignal(message) {
+  const state = ensurePeer(message.from);
+  if (message.kind === 'ice') {
+    if (state.pc.remoteDescription) state.pc.addIceCandidate(message.data).catch(() => {});
+    else state.pending.push(message.data);
+  } else if (message.kind === 'offer') {
+    await state.pc.setRemoteDescription(message.data);
+    flushCandidates(state);
+    const answer = await state.pc.createAnswer();
+    await state.pc.setLocalDescription(answer);
+    await postJSON('/api/signal', {
+      from: SESSION, to: message.from, kind: 'answer', data: state.pc.localDescription,
+    });
+  } else if (message.kind === 'answer') {
+    await state.pc.setRemoteDescription(message.data);
+    flushCandidates(state);
+  }
+}
+
+// ---- host state --------------------------------------------------------
+let hostState = null;
+async function refreshState() {
+  try {
+    const response = await fetch(`/api/state?session=${encodeURIComponent(SESSION)}`, { cache: 'no-store' });
+    if (!response.ok) return;
+    hostState = await response.json();
+    // Leaving the room is a room-level action. There is no room to publish
+    // into after it lands, so the browser must not keep the microphone live.
+    if (callActive && !hostState.room) stopCall(true);
+    updateStatus();
+  } catch (_) {}
+}
+
+function updateStatus() {
+  const room = hostState?.room?.name || 'lobby';
+  const call = hostState?.call?.state || 'idle';
+  status.textContent =
+    `${room} · ${call} · ${peers.size} peer${peers.size === 1 ? '' : 's'} · ${new Date().toLocaleTimeString()}`;
+}
+
+async function sendMessage() {
+  const text = composer.value.trim();
+  if (!text) return;
+  await postJSON('/api/action', { id: 'send-message', session: SESSION, text });
+  composer.value = '';
+  schedule(100);
+  setTimeout(refreshState, 140);
+}
+
+async function askJarvis() {
+  const text = composer.value.trim();
+  if (!text) {
+    status.textContent = 'Type a message for JARVIS first.';
+    composer.focus();
+    return;
+  }
+  await postJSON('/api/action', { id: 'address-agent', session: SESSION, text });
+  composer.value = '';
+  schedule(100);
+  setTimeout(refreshState, 140);
+}
+
+async function activate(button) {
+  const id = button.id || button.action;
+  if (!id) return;
+  if (id === 'message-input') return composer.focus();
+  if (id === 'join-call') return startCall();
+  if (id === 'leave-call') return stopCall(true);
+  if (id === 'toggle-mic') return setMuted(!callMuted);
+  if (id === 'address-agent') return askJarvis();
+  await postJSON('/api/action', { id, session: SESSION });
+  schedule(120);
+  setTimeout(refreshState, 150);
+}
+
+composer.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' || event.shiftKey) return;
+  event.preventDefault();
+  sendMessage();
+});
+
+canvas.addEventListener('mousemove', (event) => {
+  const button = hitAt(event.clientX, event.clientY);
+  const next = button?.id || button?.action || '';
+  if (next !== hover) { hover = next; if (current) draw(current); }
+  canvas.style.cursor = button ? 'pointer' : 'default';
+});
+canvas.addEventListener('mouseleave', () => {
+  if (!hover) return;
+  hover = '';
+  if (current) draw(current);
+  canvas.style.cursor = 'default';
+});
+canvas.addEventListener('click', (event) => {
+  const button = hitAt(event.clientX, event.clientY);
+  if (button) activate(button);
+});
+addEventListener('resize', () => { schedule(60); place(); });
+
+// A call left running in a tab that is gone must not make the room look busy
+// forever. The server also expires silent browser state; this is the fast path.
+addEventListener('pagehide', () => {
+  if (!callActive) return;
+  navigator.sendBeacon('/api/call', new Blob([JSON.stringify({
+    session: SESSION, state: 'idle', muted: false, peer_count: 0, mic_rms: 0,
+  })], { type: 'application/json' }));
+});
+
+refreshState();
+refresh();
+setInterval(refresh, 3000);
+setInterval(refreshState, 3000);
+</script>
+</body>
+</html>

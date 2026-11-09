@@ -14,9 +14,12 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+pub mod host;
 pub mod plugin;
 
 pub const JOIN_KIND: &str = "room.join.v1";
+pub const ADDRESS_KIND: &str = "room.address.v1";
+pub const ADDRESSED_KIND: &str = "room.addressed.v1";
 pub const LEAVE_KIND: &str = "room.leave.v1";
 pub const SELF_KIND: &str = "room.self.v1";
 pub const LIST_KIND: &str = "room.list.v1";
@@ -27,7 +30,7 @@ pub const ERROR_KIND: &str = "room.error.v1";
 
 /// Every kind this service owns. A client publishes only the four request
 /// kinds; the rest are service-authored.
-pub const REQUEST_KINDS: &[&str] = &[JOIN_KIND, LEAVE_KIND, SELF_KIND, LIST_KIND];
+pub const REQUEST_KINDS: &[&str] = &[JOIN_KIND, ADDRESS_KIND, LEAVE_KIND, SELF_KIND, LIST_KIND];
 
 pub const CAP_MEMBER: &str = "room.member";
 pub const CAP_OWNER: &str = "room.owner";
@@ -40,6 +43,7 @@ pub const MAX_BUSES: usize = 4;
 pub const MAX_ID: usize = 64;
 pub const MAX_NAME: usize = 64;
 pub const MAX_ERROR: usize = 160;
+pub const MAX_ADDRESS: usize = 1_000;
 pub const MIN_BUFFER_MS: u32 = 10;
 pub const MAX_BUFFER_MS: u32 = 2_000;
 
@@ -172,6 +176,29 @@ pub struct SelfState {
     /// A member may switch presenters without changing membership.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presenter: Option<Presenter>,
+}
+
+/// A member asking the room service to hand one addressed turn to an agent.
+///
+/// The request carries text, not audio. The agent decides whether to speak and
+/// how; the room service never sees media bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Address {
+    pub target: String,
+    pub text: String,
+}
+
+/// One addressed turn delivered only to the target agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Addressed {
+    pub revision: u64,
+    pub room: String,
+    pub target: String,
+    pub from: String,
+    pub text: String,
+    pub turn_id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -460,6 +487,41 @@ impl Rooms {
             change: MemberChange::Updated,
             member,
         }))
+    }
+
+    /// Deliver one addressed turn to an agent in the caller's room. Only the
+    /// target receives it; this is not a room broadcast and it is not a
+    /// transcript.
+    pub fn address(&mut self, from: &str, address: Address) -> Result<Addressed, RoomError> {
+        validate_id(&address.target, "target")?;
+        let room_id = self
+            .room_of(from)
+            .map(str::to_owned)
+            .ok_or_else(|| RoomError::new(ErrorCode::NotJoined, "join a room first"))?;
+        let text = address.text.trim();
+        if text.is_empty() || text.len() > MAX_ADDRESS || text.chars().any(char::is_control) {
+            return Err(RoomError::invalid("address text must be 1-1000 printable bytes"));
+        }
+        let room = self
+            .rooms
+            .get_mut(&room_id)
+            .ok_or_else(|| RoomError::new(ErrorCode::NotJoined, "room disappeared"))?;
+        let target = room
+            .members
+            .get(&address.target)
+            .ok_or_else(|| RoomError::new(ErrorCode::NotJoined, "target is not in this room"))?;
+        if target.role != Role::Agent {
+            return Err(RoomError::invalid("target is not an agent"));
+        }
+        room.revision += 1;
+        Ok(Addressed {
+            revision: room.revision,
+            room: room_id,
+            target: address.target,
+            from: from.to_owned(),
+            text: text.to_owned(),
+            turn_id: room.revision,
+        })
     }
 
     pub fn welcome(&self, id: &str) -> Option<Welcome> {

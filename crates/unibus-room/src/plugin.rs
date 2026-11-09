@@ -15,9 +15,9 @@ use unibus::{Envelope, Message};
 use unibus_router::plugin::{HubHandle, HubPlugin};
 
 use crate::{
-    CAP_MEMBER, ERROR_KIND, ErrorCode, JOIN_KIND, Join, LEAVE_KIND, LIST_KIND, LIST_REPLY_KIND,
-    MEMBER_KIND, MemberEvent, RoomConfig, RoomError, Rooms, SELF_KIND, SelfState, WELCOME_KIND,
-    role_for,
+    ADDRESSED_KIND, ADDRESS_KIND, Address, CAP_MEMBER, ERROR_KIND, ErrorCode, JOIN_KIND, Join,
+    LEAVE_KIND, LIST_KIND, LIST_REPLY_KIND, MEMBER_KIND, MemberEvent, RoomConfig, RoomError, Rooms,
+    SELF_KIND, SelfState, WELCOME_KIND, role_for,
 };
 
 pub const SERVICE_ID: &str = "unibus-room";
@@ -139,6 +139,24 @@ impl HubPlugin for RoomPlugin {
                         let body = serde_json::to_value(&outcome.welcome)
                             .context("serialize room welcome")?;
                         let _ = self.send(hub, source, WELCOME_KIND, body);
+                    }
+                    Err(error) => self.send_error(hub, source, error),
+                }
+            }
+            ADDRESS_KIND => {
+                let address = match parse::<Address>(envelope) {
+                    Ok(address) => address,
+                    Err(error) => {
+                        self.send_error(hub, source, error);
+                        return Ok(true);
+                    }
+                };
+                match rooms.address(source, address) {
+                    Ok(addressed) => {
+                        let destination = addressed.target.clone();
+                        let body = serde_json::to_value(&addressed)
+                            .context("serialize addressed turn")?;
+                        let _ = self.send(hub, &destination, ADDRESSED_KIND, body);
                     }
                     Err(error) => self.send_error(hub, source, error),
                 }
