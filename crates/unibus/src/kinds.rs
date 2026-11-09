@@ -8,6 +8,8 @@ pub enum Control {
     Register,
     Heartbeat,
     Reply,
+    /// Ask the hub for frames still inside its retained window.
+    Replay,
     /// Opaque payload; L1 routes it, never parses it.
     Data,
 }
@@ -23,6 +25,9 @@ pub const REGISTER: &str = "unibus.register";
 pub const NODE_STATE: &str = "unibus.node_state";
 pub const HEARTBEAT: &str = "unibus.heartbeat";
 pub const REPLY: &str = "unibus.reply";
+/// Replay request: `{kinds, cursor?, limit?}`. Answered with `REPLAY_PAGE`.
+pub const REPLAY: &str = "unibus.replay";
+pub const REPLAY_PAGE: &str = "unibus.replay_page";
 /// Legacy reply-body reason for valid routing with no connected recipients.
 /// This is idle demand, not authorization failure or delivery success.
 pub const REPLY_NO_ELIGIBLE_NODES: &str = "no eligible nodes";
@@ -32,6 +37,7 @@ pub fn classify(kind: &str) -> Control {
         V1_REGISTER | REGISTER => Control::Register,
         V1_HEARTBEAT | HEARTBEAT => Control::Heartbeat,
         V1_REPLY | REPLY => Control::Reply,
+        REPLAY => Control::Replay,
         _ => Control::Data,
     }
 }

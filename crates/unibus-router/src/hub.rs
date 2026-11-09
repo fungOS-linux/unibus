@@ -77,6 +77,10 @@ pub struct Hub {
     routes: Arc<HashMap<String, RouteTarget>>,
     registry: Arc<Mutex<NodeRegistry>>,
     conns: Arc<Mutex<HashMap<String, Arc<dyn Sink>>>>,
+    /// Frames that reached nobody, kept briefly so a consumer that reconnects
+    /// can ask for what it missed, and recorded when they fall out.
+    retention: Arc<Mutex<crate::retention::Retention>>,
+    dead_letters: Arc<crate::retention::DeadLetters>,
     plugins: Arc<Vec<Arc<dyn HubPlugin>>>,
     verifier: Option<Arc<dyn unibus::OfflineVerifier>>,
     #[cfg(feature = "viewer")]
@@ -236,12 +240,15 @@ impl Hub {
             .collect();
         #[cfg(feature = "viewer")]
         let widget_store = Arc::new(crate::viewer::widgets::Store::default());
+        let state_dir = config.state_dir.clone();
         Ok(Self {
             config: Arc::new(config),
             grants: Arc::new(grants),
             routes: Arc::new(routes),
             registry: Arc::new(Mutex::new(NodeRegistry::new())),
             conns: Arc::new(Mutex::new(HashMap::new())),
+            retention: Arc::new(Mutex::new(crate::retention::Retention::default())),
+            dead_letters: Arc::new(crate::retention::DeadLetters::new(state_dir.as_deref())),
             #[cfg(not(feature = "viewer"))]
             plugins: Arc::new(Vec::new()),
             #[cfg(feature = "viewer")]
@@ -697,6 +704,71 @@ impl Hub {
                     .upsert(node);
                 return Ok(());
             }
+            Control::Replay => {
+                // A consumer that reconnects asks what it missed. The answer is
+                // bounded by `MAX_REPLAY`: a page is a reply envelope, not a
+                // stream, and the cursor it returns asks again for more.
+                let kinds: Vec<String> = envelope
+                    .message
+                    .body
+                    .get("kinds")
+                    .and_then(|kinds| kinds.as_array())
+                    .map(|kinds| {
+                        kinds
+                            .iter()
+                            .filter_map(|kind| kind.as_str().map(str::to_owned))
+                            .take(16)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let cursor = envelope
+                    .message
+                    .body
+                    .get("cursor")
+                    .and_then(|cursor| cursor.as_str());
+                let limit = envelope
+                    .message
+                    .body
+                    .get("limit")
+                    .and_then(|limit| limit.as_u64())
+                    .unwrap_or(crate::retention::MAX_REPLAY as u64)
+                    as usize;
+                let at = now_ms();
+                let page = self
+                    .retention
+                    .lock()
+                    .map(|mut retention| retention.replay(&kinds, cursor, limit, at))
+                    .unwrap_or_default();
+                let frames: Vec<serde_json::Value> = page
+                    .frames
+                    .iter()
+                    .map(|frame| {
+                        serde_json::json!({
+                            "sequence": frame.sequence,
+                            "kind": frame.kind,
+                            "envelope": frame.envelope,
+                            "payload_hex": crate::retention::hex(&frame.payload),
+                        })
+                    })
+                    .collect();
+                let reply = Envelope::new(
+                    &self.config.installation_id,
+                    producer_id,
+                    None,
+                    "",
+                    Message::new(
+                        kinds::REPLAY_PAGE,
+                        serde_json::json!({
+                            "request_id": envelope.request_id,
+                            "frames": frames,
+                            "next": page.next,
+                            "stale": page.stale,
+                        }),
+                    ),
+                );
+                connection.push(&reply, &[])?;
+                return Ok(());
+            }
             Control::Data => {
                 if let Err(error) = self.authorize_publish(producer_id, &envelope) {
                     warn!("publication rejected for '{producer_id}': {error:#}");
@@ -825,6 +897,18 @@ impl Hub {
                 "kind '{}' from '{source}' matched no live node",
                 envelope.message.kind
             );
+            // Rotted but routable: nobody was there. Keep it briefly so a
+            // consumer that reconnects can ask, and record it if it falls out
+            // of that window unseen.
+            let at = now_ms();
+            let evicted = self
+                .retention
+                .lock()
+                .map(|mut retention| retention.retain(envelope, payload, at))
+                .unwrap_or_default();
+            for (frame, reason) in evicted {
+                self.dead_letters.record(&frame, reason, at);
+            }
         }
         Ok((
             delivered > 0,
@@ -1037,5 +1121,143 @@ impl HubHandle {
             envelope,
             payload,
         )
+    }
+}
+
+#[cfg(test)]
+mod retention_wiring_tests {
+    use super::*;
+
+    /// Collects what the hub pushes, so a test can read a reply back.
+    struct RecordingSink(Mutex<Vec<(Envelope, Vec<u8>)>>);
+
+    impl RecordingSink {
+        fn new() -> Self {
+            Self(Mutex::new(Vec::new()))
+        }
+
+        fn frames(&self) -> Vec<Envelope> {
+            self.0
+                .lock()
+                .map(|frames| {
+                    frames
+                        .iter()
+                        .map(|(envelope, _)| envelope.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    }
+
+    impl Sink for RecordingSink {
+        fn push(&self, envelope: &Envelope, payload: &[u8]) -> Result<()> {
+            if let Ok(mut frames) = self.0.lock() {
+                frames.push((envelope.clone(), payload.to_vec()));
+            }
+            Ok(())
+        }
+
+        fn peer_schema(&self) -> u32 {
+            2
+        }
+    }
+
+    fn hub() -> Hub {
+        Hub::new(HubConfig {
+            installation_id: "home".into(),
+            listen: "127.0.0.1:0".into(),
+            allow_insecure_lan: true,
+            quic: None,
+            state_dir: None,
+            routes: vec![crate::config::RouteRule {
+                kind: "confluence.webhook.v1".into(),
+                target: RouteTarget::Capability {
+                    name: "confluence.consume".into(),
+                },
+            }],
+            nodes: Vec::new(),
+        })
+        .expect("hub")
+    }
+
+    fn data() -> Envelope {
+        Envelope::new(
+            "home",
+            "ingress",
+            None,
+            "",
+            Message::new("confluence.webhook.v1", serde_json::json!({"id": "d-1"})),
+        )
+    }
+
+    fn replay_request() -> Envelope {
+        Envelope::new(
+            "home",
+            "consumer",
+            None,
+            "",
+            Message::new(
+                kinds::REPLAY,
+                serde_json::json!({"kinds": ["confluence.webhook.v1"]}),
+            ),
+        )
+    }
+
+    #[test]
+    fn a_frame_nobody_held_is_replayed_to_the_consumer_that_asks() {
+        let hub = hub();
+        // Routable, but no live holder: the pre-existing behaviour was a log
+        // line and a lost frame.
+        let (success, _) = hub
+            .route_default("ingress", &data(), &[])
+            .expect("routable");
+        assert!(!success, "nobody held the capability");
+        assert_eq!(
+            hub.retention
+                .lock()
+                .expect("retention")
+                .depth("confluence.webhook.v1"),
+            1,
+            "the frame is in the window"
+        );
+
+        // A consumer that was not live at publish time asks for it.
+        let sink = RecordingSink::new();
+        let mut request = replay_request();
+        request.issued_at_unix_ms = now_ms();
+        hub.handle_registered_frame("consumer", &sink, request, Vec::new())
+            .expect("replay answered");
+        let answered = sink.frames();
+        assert_eq!(answered.len(), 1, "one replay page");
+        assert_eq!(answered[0].message.kind, kinds::REPLAY_PAGE);
+        assert_eq!(
+            answered[0].message.body["frames"][0]["kind"],
+            "confluence.webhook.v1"
+        );
+        assert_eq!(answered[0].message.body["stale"], false);
+        assert!(
+            answered[0].message.body["next"].is_string(),
+            "the consumer gets a cursor"
+        );
+    }
+
+    #[test]
+    fn a_kind_with_no_route_is_still_an_error_not_a_retained_frame() {
+        let hub = hub();
+        let mut envelope = data();
+        envelope.message.kind = "unrouted.v1".into();
+        let (success, reason) = hub
+            .route_default("ingress", &envelope, &[])
+            .expect("a missing route is reported, not fatal");
+        assert!(!success, "nothing was delivered");
+        assert!(reason.is_some(), "the publisher is told why");
+        assert_eq!(
+            hub.retention
+                .lock()
+                .expect("retention")
+                .depth("unrouted.v1"),
+            0,
+            "a missing route is a misconfiguration, not a missed consumer"
+        );
     }
 }
